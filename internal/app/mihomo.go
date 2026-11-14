@@ -61,6 +61,43 @@ func isGeminiRegionResponse(status int, raw []byte, err error) bool {
 	if json.Unmarshal(raw, &envelope) == nil && isGeminiRegionMessage(envelope.Error.Message) {
 		return true
 	}
+	// Legacy StreamGenerate can report region error 1060 inside the status details
+	// of an otherwise empty HTTP 200 response. Inspect only typed service errors.
+	for _, line := range strings.Split(string(raw), "\n") {
+		var frames [][]json.RawMessage
+		if !strings.Contains(line, `"wrb.fr"`) || json.Unmarshal([]byte(line), &frames) != nil {
+			continue
+		}
+		for _, frame := range frames {
+			var tag string
+			var serviceError []json.RawMessage
+			if len(frame) < 6 || json.Unmarshal(frame[0], &tag) != nil || tag != "wrb.fr" ||
+				json.Unmarshal(frame[5], &serviceError) != nil || len(serviceError) < 3 {
+				continue
+			}
+			var details [][]json.RawMessage
+			if json.Unmarshal(serviceError[2], &details) != nil {
+				continue
+			}
+			for _, detail := range details {
+				var detailType string
+				var info []json.RawMessage
+				if len(detail) < 2 || json.Unmarshal(detail[0], &detailType) != nil ||
+					detailType != "type.googleapis.com/assistant.boq.bard.application.BardErrorInfo" ||
+					json.Unmarshal(detail[1], &info) != nil || len(info) == 0 {
+					continue
+				}
+				var code int
+				if json.Unmarshal(info[0], &code) == nil && code == 1060 {
+					return true
+				}
+				var message string
+				if len(info) > 2 && json.Unmarshal(info[2], &message) == nil && isGeminiRegionMessage(message) {
+					return true
+				}
+			}
+		}
+	}
 	// WebChannel status errors are returned as this exact plain-text prefix.
 	return status >= 400 && strings.HasPrefix(string(raw), "processSession status ") &&
 		isGeminiRegionMessage(string(raw))

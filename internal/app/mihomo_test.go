@@ -27,6 +27,14 @@ func TestGeminiRegionDetection(t *testing.T) {
 		{"generated region explanation", 200, refusalTestFrame("Gemini is not available in your country."), nil, false},
 		{"policy refusal", 200, refusalTestFrame(refusalSample), nil, false},
 		{"empty frame", 200, `[["er",null,null,1155]]`, nil, false},
+		{"legacy region error", 200, legacyRegionRaw, nil, true},
+		{"legacy code without message", 200, strings.ReplaceAll(legacyRegionRaw, `,null,"Gemini isn't available in your region yet. (1060)"`, ""), nil, true},
+		{"legacy changed code with region message", 200, strings.ReplaceAll(legacyRegionRaw, "[1060,", "[9999,"), nil, true},
+		{"legacy unrelated detail type", 200, strings.ReplaceAll(legacyRegionRaw, "BardErrorInfo", "UnrelatedInfo"), nil, false},
+		{"legacy ordinary empty reply", 200, rejectedRaw, nil, false},
+		{"legacy region trailer after generated content", 200, okRaw + legacyRegionRaw, nil, false},
+		{"malformed legacy status", 200, `[["wrb.fr",null,null,null,null,[9,null,{"code":1060}]]]`, nil, false},
+		{"incomplete legacy status", 200, `[["wrb.fr",null,null,null,null,[9,null]]]`, nil, false},
 		{"unknown HTTP error", 502, "Bad Gateway", nil, false},
 		{"rate limit", 429, `{"error":{"message":"Resource exhausted"}}`, nil, false},
 		{"timeout", 0, "", errUpstreamTimeout, false},
@@ -55,6 +63,10 @@ func TestGeminiRegionDetection(t *testing.T) {
 		}
 	}
 }
+
+// Reproduce the real service error with synthetic timing/response metadata.
+const legacyRegionRaw = ")]}'\n\n200\n" +
+	`[["wrb.fr",null,null,null,null,[9,null,[["type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",[1060,null,"Gemini isn't available in your region yet. (1060)"]]]]]]` + "\n"
 
 type fakeMihomo struct {
 	mu                sync.Mutex
@@ -209,7 +221,7 @@ func TestMihomoControllerFailures(t *testing.T) {
 }
 
 func TestMihomoRecoveryBudgetAndRouting(t *testing.T) {
-	for _, mode := range []string{"recover", "budget", "disabled", "unrelated error", "different proxy", "direct", "partial text", "partial reasoning"} {
+	for _, mode := range []string{"recover", "legacy region", "legacy empty", "budget", "disabled", "unrelated error", "different proxy", "direct", "partial text", "partial reasoning"} {
 		t.Run(mode, func(t *testing.T) {
 			f, c := newFakeMihomo(t)
 			if mode == "disabled" {
@@ -220,7 +232,7 @@ func TestMihomoRecoveryBudgetAndRouting(t *testing.T) {
 			res, err := generateWithMihomoRecovery(func() (*StreamResult, error) {
 				calls++
 				r := &StreamResult{ProxyID: 7}
-				if mode == "recover" && calls == 2 {
+				if (mode == "recover" || mode == "legacy region") && calls == 2 {
 					return r, nil
 				}
 				if mode == "different proxy" {
@@ -238,13 +250,22 @@ func TestMihomoRecoveryBudgetAndRouting(t *testing.T) {
 				if mode == "unrelated error" {
 					return r, errUpstreamTimeout
 				}
+				if mode == "legacy region" || mode == "legacy empty" {
+					raw := legacyRegionRaw
+					if mode == "legacy empty" {
+						raw = rejectedRaw
+					}
+					if !isGeminiRegionResponse(200, []byte(raw), nil) {
+						return r, errors.New("no content frame")
+					}
+				}
 				return r, errGeminiRegion
 			})
 			if res == nil {
 				t.Fatal("lost result attribution")
 			}
 			switch mode {
-			case "recover":
+			case "recover", "legacy region":
 				if calls != 2 || f.puts != 1 || err != nil {
 					t.Fatalf("recovery: calls=%d puts=%d err=%v", calls, f.puts, err)
 				}
