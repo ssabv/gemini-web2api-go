@@ -1079,6 +1079,25 @@ const RT_GROUPS = [
     ],
   },
   {
+    title: 'mihomo 地区限制切换',
+    fields: [
+      { k: 'mihomo_auto_switch', label: '地区不支持时自动换节点', type: 'bool',
+        hint: '默认关。仅在上游明确报告地区不支持、且请求走指定代理时切换指定的 Selector 组并重试。普通拒答、超时、限流和空响应不触发；已输出正文或思考时不重发。控制器 secret 在部署环境变量 MIHOMO_SECRET 或 config.json 的 mihomo_secret 设置，不在面板显示' },
+      { k: 'mihomo_controller', label: '控制器地址', type: 'text',
+        hint: 'external-controller 的 HTTP/HTTPS 地址，例如 http://mihomo:9090；不是代理端口，不要在地址里填密码' },
+      { k: 'mihomo_group', label: 'Gemini 策略组', type: 'text',
+        hint: '填负责 Gemini 出口的手动选择组名称，只切这个组；不支持自动选择或负载均衡组。新协议的 geminiweb-pa.clients6.google.com 也须路由到此组' },
+      { k: 'mihomo_proxy_url', label: '对应代理地址', type: 'text',
+        hint: '与代理池里的 URL 完全一致，例如 http://mihomo:7890；其他代理或直连报错不会触发切换' },
+      { k: 'mihomo_nodes', label: '候选节点（可选）', type: 'textarea', wide: true,
+        hint: '用 | 分隔节点名，按顺序轮换；也接受换行。留空按组内顺序选择可用的独立节点，跳过子组、直连和拒绝节点。地区不支持的节点暂避 30 分钟；名称不代表实际出口地区' },
+      { k: 'mihomo_max_switches', label: '单次请求最多切换', type: 'int', min: 0, max: 5,
+        hint: '默认 2；开启时须为 1—5。用完或无候选节点就返回错误，不无限换节点' },
+      { k: 'mihomo_cooldown_sec', label: '两次切换最小间隔（秒）', type: 'int', min: 0, max: 300,
+        hint: '默认 5；间隔内不再切换。同一旧节点的并发失败共用一次切换结果。0 关闭间隔限制' },
+    ],
+  },
+  {
     title: '数据与日志',
     fields: [
       { k: 'retention_days', label: '明细保留（天）', type: 'int', min: 1, max: 3650,
@@ -1105,6 +1124,8 @@ async function loadRtCfg() {
       ).join('') + '</select>';
     } else if (f.type === 'int') {
       input = `<input type="number" id="rt_${f.k}" value="${v}" min="${f.min}" max="${f.max}">`;
+    } else if (f.type === 'textarea') {
+      input = `<textarea id="rt_${f.k}" rows="3">${escapeHtml(String(v ?? ''))}</textarea>`;
     } else {
       input = `<input type="text" id="rt_${f.k}" value="${escapeHtml(String(v ?? ''))}">`;
     }

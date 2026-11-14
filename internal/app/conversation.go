@@ -219,8 +219,19 @@ func getAnonSession(proxyURL string) (string, error) {
 		return "", err
 	}
 	if body != nil {
-		io.Copy(io.Discard, body)
-		body.Close()
+		if rtCfg().MihomoAutoSwitch {
+			raw, readErr := io.ReadAll(body)
+			body.Close()
+			if readErr != nil {
+				return "", readErr
+			}
+			if isGeminiRegionPage(raw) {
+				return "", errGeminiRegion
+			}
+		} else {
+			io.Copy(io.Discard, body)
+			body.Close()
+		}
 	}
 	var pairs []string
 	seen := map[string]bool{}
@@ -247,6 +258,13 @@ const webUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 // 整条会话绑定 conv.cookie / conv.proxyID，中途不换号不换出口。成功后回填 conv 的
 // cid/rid/rcid/tok26 和 turn+1，供下一轮续接。
 func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
+	onDelta, onReasoning func(string)) (*StreamResult, error) {
+	return generateWithMihomoRecovery(func() (*StreamResult, error) {
+		return streamGenerateConvOnce(prompt, mc, conv, onDelta, onReasoning)
+	})
+}
+
+func streamGenerateConvOnce(prompt string, mc ModelConfig, conv *convState,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
 	p, slotOK, slotErr := acquireSlot(conv.proxyID)
 	if !slotOK {
@@ -380,6 +398,10 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 			if merged := mergeSetCookie(conv.cookie, setCookie); merged != conv.cookie {
 				conv.cookie = merged
 			}
+		}
+		if rtCfg().MihomoAutoSwitch && isGeminiRegionResponse(statusCode, raw, err) {
+			return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID,
+				Emitted: tracker.emitted, EmittedReasoning: rtracker.emitted}, errGeminiRegion
 		}
 		// 降级：同一个号重试还是降级，直接交给上层（见 gemini.go 同一处）。
 		var mde *ModelDowngradedError

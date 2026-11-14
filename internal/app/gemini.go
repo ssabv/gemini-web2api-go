@@ -395,6 +395,13 @@ type fileRef struct {
 // 匿名能把文件传上去，但对话里一引用就被服务端回 1100。
 func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pendingUpload,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
+	return generateWithMihomoRecovery(func() (*StreamResult, error) {
+		return streamGenerateFilesOnce(prompt, latest, mc, pending, onDelta, onReasoning)
+	})
+}
+
+func streamGenerateFilesOnce(prompt, latest string, mc ModelConfig, pending []pendingUpload,
+	onDelta, onReasoning func(string)) (*StreamResult, error) {
 	// strict_model 换号：被降级的号记冷却、本次排除，换下一个号重来。上限跟 XSRF 换号
 	// 一样是 maxCookieTries——连着几个号都降级，说明池子整体见底，不是撞上个别号。
 	exclude := map[int64]bool{}
@@ -491,6 +498,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		// 归属先记上：这一轮失败了也留痕，面板上看得出是哪个号在坏
 		cookieID, cookieLabel = acct.ID, accountDisplayName(acct)
 		tok, err := getXSRF(acct.Cookie, acct.AuthUser, proxyURL)
+		if errors.Is(err, errGeminiRegion) {
+			return attrib(err)
+		}
 		if err == nil {
 			cookieStr, sapisid, xsrfToken = acct.Cookie, extractSAPISID(acct.Cookie), tok
 			authUser = acct.AuthUser
@@ -787,6 +797,11 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 				cookieStr = merged
 				updateAccountCookie(cookieID, merged)
 			}
+		}
+		if rtCfg().MihomoAutoSwitch && isGeminiRegionResponse(statusCode, raw, err) {
+			res, _ := attrib(nil)
+			res.Emitted, res.EmittedReasoning = tracker.emitted, rtracker.emitted
+			return res, errGeminiRegion
 		}
 		// 降级不是出口或 cookie 的错，也不该重试：同一个号再发一次还是降级。
 		var mde *ModelDowngradedError

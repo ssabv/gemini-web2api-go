@@ -72,6 +72,16 @@ type Config struct {
 	StrictModelCooldownMin int `json:"strict_model_cooldown_min"`
 	// 流式保活间隔（秒），0 = 关（默认）。见 keepalive.go。
 	StreamKeepaliveSec int `json:"stream_keepalive_sec"`
+
+	MihomoAutoSwitch  bool   `json:"mihomo_auto_switch"`
+	MihomoController  string `json:"mihomo_controller"`
+	MihomoGroup       string `json:"mihomo_group"`
+	MihomoProxyURL    string `json:"mihomo_proxy_url"`
+	MihomoNodes       string `json:"mihomo_nodes"`
+	MihomoMaxSwitches int    `json:"mihomo_max_switches"`
+	MihomoCooldownSec int    `json:"mihomo_cooldown_sec"`
+	// Deployment credential; never returned by the runtime config API.
+	MihomoSecret string `json:"mihomo_secret"`
 }
 
 var (
@@ -120,6 +130,9 @@ func defaultConfig() Config {
 		FirefoxFingerprint:     false,
 		StrictModel:            false,
 		StrictModelCooldownMin: 300,
+
+		MihomoMaxSwitches: 2,
+		MihomoCooldownSec: 5,
 	}
 }
 
