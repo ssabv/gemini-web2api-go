@@ -11,6 +11,7 @@ import (
 //  3. retention: deletes raw requests older than rtCfg().RetentionDays
 //  4. proxy cache reload: every 60s pull proxies from DB
 func startScheduler() {
+	go runMihomoOptimizer()
 	go func() {
 		// On boot: catch up any aggregations missed while service was down.
 		aggregateHourlyCatchup()

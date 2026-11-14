@@ -77,6 +77,8 @@ type fakeMihomo struct {
 	wrongConfirmation bool
 	groupType         string
 	proxies           map[string]mihomoProxy
+	delays            map[string]int
+	delayFailed       bool
 }
 
 func newFakeMihomo(t *testing.T) (*fakeMihomo, RuntimeConfig) {
@@ -108,6 +110,12 @@ func newFakeMihomo(t *testing.T) (*fakeMihomo, RuntimeConfig) {
 				pool[n] = p
 			}
 			json.NewEncoder(w).Encode(map[string]any{"proxies": pool})
+		case r.Method == "GET" && r.URL.Path == "/group/"+c.MihomoGroup+"/delay":
+			if f.delayFailed {
+				w.WriteHeader(500)
+				return
+			}
+			json.NewEncoder(w).Encode(f.delays)
 		case r.URL.Path == "/proxies/"+c.MihomoGroup && r.Method == "GET":
 			json.NewEncoder(w).Encode(group)
 		case r.URL.Path == "/proxies/"+c.MihomoGroup && r.Method == "PUT":
@@ -161,7 +169,7 @@ func setMihomoTestConfig(t *testing.T, c RuntimeConfig) {
 func TestMihomoSwitchAndConcurrentDedup(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	s := &mihomoSwitcher{}
-	started := time.Now()
+	started := s.generation.Load()
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
@@ -177,13 +185,13 @@ func TestMihomoSwitchAndConcurrentDedup(t *testing.T) {
 		t.Fatalf("concurrent switching: puts=%d now=%s", f.puts, f.now)
 	}
 	// A fresh failed operation may select the next node; it cannot return to old.
-	if err := s.switchNode(c, "test-secret", time.Now()); err != nil {
+	if err := s.switchNode(c, "test-secret", s.generation.Load()); err != nil {
 		t.Fatal(err)
 	}
 	if f.puts != 2 || f.now != "last" {
 		t.Fatalf("second switch: puts=%d now=%s", f.puts, f.now)
 	}
-	if err := s.switchNode(c, "test-secret", time.Now()); err == nil {
+	if err := s.switchNode(c, "test-secret", s.generation.Load()); err == nil {
 		t.Fatal("cycled back to a region-blocked node")
 	}
 }
@@ -205,12 +213,12 @@ func TestMihomoControllerFailures(t *testing.T) {
 			case "no candidates":
 				c.MihomoNodes = "missing|DIRECT|dead|subgroup"
 			case "cooldown":
-				if err := s.switchNode(c, "test-secret", time.Now()); err != nil {
+				if err := s.switchNode(c, "test-secret", s.generation.Load()); err != nil {
 					t.Fatal(err)
 				}
 				c.MihomoCooldownSec = 300
 			}
-			if err := s.switchNode(c, "test-secret", time.Now()); err == nil {
+			if err := s.switchNode(c, "test-secret", s.generation.Load()); err == nil {
 				t.Fatal("expected controller failure")
 			}
 			if f.puts > 1 {
@@ -286,14 +294,14 @@ func TestMihomoCandidateAllowlistAndExpiry(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoNodes = "last | next"
 	s := &mihomoSwitcher{}
-	if err := s.switchNode(c, "test-secret", time.Now()); err != nil {
+	if err := s.switchNode(c, "test-secret", s.generation.Load()); err != nil {
 		t.Fatal(err)
 	}
 	if f.now != "last" {
 		t.Fatal("ignored candidate order")
 	}
 	s.blocked["next"] = time.Now().Add(-time.Second)
-	if err := s.switchNode(c, "test-secret", time.Now()); err != nil {
+	if err := s.switchNode(c, "test-secret", s.generation.Load()); err != nil {
 		t.Fatal(err)
 	}
 	if f.now != "next" {

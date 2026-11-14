@@ -84,13 +84,17 @@ type RuntimeConfig struct {
 	// 开了之后慢请求会先开流，失败只能在流里报错、HTTP 状态码锁成 200，见 keepalive.go。
 	StreamKeepaliveSec int `json:"stream_keepalive_sec"`
 
-	MihomoAutoSwitch  bool   `json:"mihomo_auto_switch"`
-	MihomoController  string `json:"mihomo_controller"`
-	MihomoGroup       string `json:"mihomo_group"`
-	MihomoProxyURL    string `json:"mihomo_proxy_url"`
-	MihomoNodes       string `json:"mihomo_nodes"`
-	MihomoMaxSwitches int    `json:"mihomo_max_switches"`
-	MihomoCooldownSec int    `json:"mihomo_cooldown_sec"`
+	MihomoAutoSwitch          bool   `json:"mihomo_auto_switch"`
+	MihomoController          string `json:"mihomo_controller"`
+	MihomoGroup               string `json:"mihomo_group"`
+	MihomoProxyURL            string `json:"mihomo_proxy_url"`
+	MihomoNodes               string `json:"mihomo_nodes"`
+	MihomoMaxSwitches         int    `json:"mihomo_max_switches"`
+	MihomoCooldownSec         int    `json:"mihomo_cooldown_sec"`
+	MihomoPreferLowLatency    bool   `json:"mihomo_prefer_low_latency"`
+	MihomoAutoOptimize        bool   `json:"mihomo_auto_optimize"`
+	MihomoOptimizeIntervalMin int    `json:"mihomo_optimize_interval_min"`
+	MihomoProbeTimeoutSec     int    `json:"mihomo_probe_timeout_sec"`
 }
 
 const runtimeConfigKey = "runtime_config"
@@ -135,13 +139,17 @@ func initRuntimeConfig() {
 		StrictModelCooldownMin: cfg.StrictModelCooldownMin,
 		StreamKeepaliveSec:     cfg.StreamKeepaliveSec,
 
-		MihomoAutoSwitch:  cfg.MihomoAutoSwitch,
-		MihomoController:  cfg.MihomoController,
-		MihomoGroup:       cfg.MihomoGroup,
-		MihomoProxyURL:    cfg.MihomoProxyURL,
-		MihomoNodes:       cfg.MihomoNodes,
-		MihomoMaxSwitches: cfg.MihomoMaxSwitches,
-		MihomoCooldownSec: cfg.MihomoCooldownSec,
+		MihomoAutoSwitch:          cfg.MihomoAutoSwitch,
+		MihomoController:          cfg.MihomoController,
+		MihomoGroup:               cfg.MihomoGroup,
+		MihomoProxyURL:            cfg.MihomoProxyURL,
+		MihomoNodes:               cfg.MihomoNodes,
+		MihomoMaxSwitches:         cfg.MihomoMaxSwitches,
+		MihomoCooldownSec:         cfg.MihomoCooldownSec,
+		MihomoPreferLowLatency:    cfg.MihomoPreferLowLatency,
+		MihomoAutoOptimize:        cfg.MihomoAutoOptimize,
+		MihomoOptimizeIntervalMin: cfg.MihomoOptimizeIntervalMin,
+		MihomoProbeTimeoutSec:     cfg.MihomoProbeTimeoutSec,
 	}
 	if raw := kvGet(runtimeConfigKey); raw != "" {
 		saved := base
@@ -190,6 +198,8 @@ func validateRuntimeConfig(c RuntimeConfig) error {
 		{"stream_keepalive_sec", c.StreamKeepaliveSec, 0, 300},
 		{"mihomo_max_switches", c.MihomoMaxSwitches, 0, 5},
 		{"mihomo_cooldown_sec", c.MihomoCooldownSec, 0, 300},
+		{"mihomo_optimize_interval_min", c.MihomoOptimizeIntervalMin, 0, 1440},
+		{"mihomo_probe_timeout_sec", c.MihomoProbeTimeoutSec, 0, 60},
 	} {
 		if r.v < r.min || r.v > r.max {
 			return fmt.Errorf("%s=%d 超出允许范围 [%d, %d]", r.name, r.v, r.min, r.max)
@@ -204,10 +214,13 @@ func validateRuntimeConfig(c RuntimeConfig) error {
 	if c.GeminiBL == "" {
 		return fmt.Errorf("gemini_bl 不能为空")
 	}
-	if c.MihomoAutoSwitch {
+	if c.MihomoAutoSwitch || c.MihomoAutoOptimize {
 		if err := validateMihomoConfig(c); err != nil {
 			return err
 		}
+	}
+	if c.MihomoAutoOptimize && (c.MihomoOptimizeIntervalMin < 1 || c.MihomoProbeTimeoutSec < 5) {
+		return fmt.Errorf("automatic mihomo optimization needs an interval of at least 1 minute and a probe timeout of at least 5 seconds")
 	}
 	return nil
 }

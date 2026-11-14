@@ -6,6 +6,7 @@
 <title>gemini-web2api 管理面板</title>
 <!-- Chart.js 随二进制一起 embed，不走 CDN：内网/离线部署也要能开面板 -->
 <script src="chart.umd.min.js"></script>
+<script src="mihomo.js"></script>
 <style>
   /* ── Gemini 设计语言（亮色）────────────────────────────────────────────
      照 gemini.google.com 本体：页面是带蓝调的白(#F8FAFD)，卡片纯白**不描边**，
@@ -195,7 +196,7 @@
   .controls button:hover { background: var(--surface-press); }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
-  select, input[type=text], input[type=password], input[type=number], textarea {
+  select, input[type=text], input[type=password], input[type=number], textarea, #mihomoPage input[type=url] {
     font-family: var(--sans); font-size: 13px; color: var(--text);
     background: var(--surface-hi); border: 1px solid transparent;
     border-radius: 10px; padding: 8px 12px; outline: none; transition: border-color .15s;
@@ -401,6 +402,20 @@
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
   }
+
+  /* Node controls share the admin shell and panel styles. */
+  #mihomoPage .panel { margin-bottom: 18px; }
+  #mihomoPage .mo-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
+  #mihomoPage .mo-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  #mihomoPage .mo-field input, #mihomoPage .mo-field select, #mihomoPage textarea { width: 100%; }
+  #mihomoPage .mo-wide { grid-column: 1/-1; }
+  #mihomoPage .mo-toggle { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+  #mihomoPage .mo-toggle input { width: 18px; height: 18px; flex: none; }
+  #mihomoPage .mo-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
+  #mihomoPage .mo-status, #mihomoPage [role=status] { color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
+  #mihomoPage table { table-layout: fixed; }
+  #mihomoPage td { overflow-wrap: anywhere; }
+  @media(max-width:640px) { #mihomoPage .mo-grid { grid-template-columns: minmax(0,1fr); } }
 </style>
 </head>
 <body>
@@ -737,6 +752,8 @@ const pages = {
       </div>
     `;
   },
+
+  mihomo: async () => MihomoPage.render(),
 
   settings: async () => {
     const k = await api('api/apikey');
@@ -1079,25 +1096,6 @@ const RT_GROUPS = [
     ],
   },
   {
-    title: 'mihomo 地区限制切换',
-    fields: [
-      { k: 'mihomo_auto_switch', label: '地区不支持时自动换节点', type: 'bool',
-        hint: '默认关。仅在上游明确报告地区不支持、且请求走指定代理时切换指定的 Selector 组并重试。普通拒答、超时、限流和空响应不触发；已输出正文或思考时不重发。控制器密码在下方单独保存，不回显' },
-      { k: 'mihomo_controller', label: '控制器地址', type: 'text',
-        hint: 'external-controller 的 HTTP/HTTPS 地址，例如 http://mihomo:9090；不是代理端口，不要在地址里填密码' },
-      { k: 'mihomo_group', label: 'Gemini 策略组', type: 'mihomo-group',
-        hint: '连接控制器后选择负责 Gemini 出口的手动选择组。自动选择或负载均衡组仅显示，不可选。新协议的 geminiweb-pa.clients6.google.com 也须路由到此组' },
-      { k: 'mihomo_proxy_url', label: '对应代理地址', type: 'text',
-        hint: '与代理池里的 URL 完全一致，例如 http://mihomo:7890；其他代理或直连报错不会触发切换' },
-      { k: 'mihomo_nodes', label: '候选节点（可选）', type: 'textarea', wide: true,
-        hint: '用 | 分隔节点名，按顺序轮换；也接受换行。留空按组内顺序选择可用的独立节点，跳过子组、直连和拒绝节点。地区不支持的节点暂避 30 分钟；名称不代表实际出口地区' },
-      { k: 'mihomo_max_switches', label: '单次请求最多切换', type: 'int', min: 0, max: 5,
-        hint: '默认 2；开启时须为 1—5。用完或无候选节点就返回错误，不无限换节点' },
-      { k: 'mihomo_cooldown_sec', label: '两次切换最小间隔（秒）', type: 'int', min: 0, max: 300,
-        hint: '默认 5；间隔内不再切换。同一旧节点的并发失败共用一次切换结果。0 关闭间隔限制' },
-    ],
-  },
-  {
     title: '数据与日志',
     fields: [
       { k: 'retention_days', label: '明细保留（天）', type: 'int', min: 1, max: 3650,
@@ -1108,23 +1106,17 @@ const RT_GROUPS = [
 ];
 
 let rtCfgCache = null, rtModels = [];
-let mihomoGroups = [], mihomoGroupRequest = 0;
 
 async function loadRtCfg() {
   const data = await api('api/config');
   if (!data) return;
   rtCfgCache = data.config; rtModels = data.models || [];
-  mihomoGroups = []; ++mihomoGroupRequest;
   // 每组先放输入框类字段（自适应多列网格），开关单独成行排在下面：开关的说明普遍
   // 很长，塞进网格的窄列里标签会被挤成一字一行。
   const inputItem = f => {
     const v = rtCfgCache[f.k];
     let input;
-    if (f.type === 'mihomo-group') {
-      input = `<select id="rt_${f.k}" onchange="showMihomoGroup()"><option value="">连接后选择策略组</option>` +
-        (v ? `<option value="${escapeHtml(v)}" selected>${escapeHtml(v)}（已保存，待连接核对）</option>` : '') + '</select>' +
-        '<div id="mihomoGroupInfo" class="rthint"></div>';
-    } else if (f.type === 'select') {
+    if (f.type === 'select') {
       input = `<select id="rt_${f.k}">` + rtModels.map(m =>
         `<option value="${escapeHtml(m)}" ${m === v ? 'selected' : ''}>${escapeHtml(m)}</option>`
       ).join('') + '</select>';
@@ -1154,27 +1146,8 @@ async function loadRtCfg() {
       <h3>${escapeHtml(g.title)}</h3>
       ${inputs.length ? `<div class="cfg-grid">${inputs.map(inputItem).join('')}</div>` : ''}
       ${toggles.length ? `<div class="cfg-toggles${inputs.length ? ' after-grid' : ''}">${toggles.map(toggleItem).join('')}</div>` : ''}
-      ${g.fields.some(f => f.k === 'mihomo_auto_switch') ? `
-        <div class="cfg-item wide" style="margin-top:16px">
-          <label for="mihomoPassword">控制器密码（secret）</label>
-          <input type="password" id="mihomoPassword" autocomplete="new-password"
-            placeholder="${data.deploy?.mihomo_secret_set ? '已设置，输入新密码可替换' : '未设置'}">
-          <div class="rthint">密码单独保存，留空不修改，保存后立即生效并在重启后保留。面板密码优先于环境变量 MIHOMO_SECRET；清除面板密码后恢复环境变量或启动配置。</div>
-          <div style="margin-top:8px">
-            <button type="button" class="btn" onclick="saveMihomoPassword()">保存密码</button>
-            <button type="button" class="btn" id="clearMihomoPassword" onclick="saveMihomoPassword(true)" ${data.deploy?.mihomo_secret_from_panel ? '' : 'disabled'}>清除面板密码</button>
-            <span id="mihomoPasswordMsg" style="font-size:12.5px;margin-left:8px"></span>
-          </div>
-          <div style="margin-top:8px">
-            <button type="button" class="btn" id="connectMihomo" onclick="loadMihomoGroups()">连接并获取策略组</button>
-            <span id="mihomoConnectionMsg" style="font-size:12.5px;margin-left:8px"></span>
-          </div>
-          <div class="rthint">连接只读取列表，不切换节点、不保存配置。输入了密码就用该密码测试；留空则用已保存的密码。新密码测试成功后仍需单独保存。</div>
-        </div>` : ''}
     </div>`;
   }).join('');
-  document.getElementById('rt_mihomo_controller').addEventListener('input', invalidateMihomoGroups);
-  document.getElementById('mihomoPassword').addEventListener('input', invalidateMihomoGroups);
 
   // 三列（项/值/怎么改）挤在窄栏里读不动，第三列换成 title 悬浮
   const d = data.deploy || {};
@@ -1189,87 +1162,6 @@ async function loadRtCfg() {
                                  : '<span class="badge ok">面板可轮换</span>', 'compose 的 API_KEY'],
   ].map(r => `<tr><td title="${escapeHtml(r[2])}">${r[0]}</td>
       <td class="pre" style="word-break:break-all;">${r[1]}</td></tr>`).join('');
-}
-
-async function saveMihomoPassword(clear = false) {
-  const input = document.getElementById('mihomoPassword');
-  const msg = document.getElementById('mihomoPasswordMsg');
-  const secret = clear ? '' : input.value;
-  if (!clear && !secret) { msg.textContent = t('请输入密码；留空不修改'); return; }
-  msg.textContent = t('保存中…'); msg.style.color = 'var(--muted)';
-  try {
-    const res = await fetch('api/mihomo/secret', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) { throw new Error(data.error || String(res.status)); }
-    input.value = '';
-    invalidateMihomoGroups();
-    input.placeholder = data.configured ? t('已设置，输入新密码可替换') : t('未设置');
-    document.getElementById('clearMihomoPassword').disabled = !data.panel_set;
-    msg.textContent = t(clear ? '已清除面板密码' : '已保存并生效'); msg.style.color = 'var(--ok)';
-  } catch (error) {
-    msg.textContent = t('保存失败：') + t(error.message); msg.style.color = 'var(--fail)';
-  }
-}
-
-function invalidateMihomoGroups() {
-  ++mihomoGroupRequest; mihomoGroups = [];
-  const select = document.getElementById('rt_mihomo_group');
-  const current = select.value;
-  select.innerHTML = '<option value="">连接后选择策略组</option>' +
-    (current ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}（待重新连接核对）</option>` : '');
-  document.getElementById('mihomoGroupInfo').textContent = '';
-  document.getElementById('mihomoConnectionMsg').textContent = t('请连接控制器获取列表');
-  document.getElementById('connectMihomo').disabled = false;
-}
-
-function showMihomoGroup() {
-  const group = mihomoGroups.find(g => g.name === document.getElementById('rt_mihomo_group').value);
-  document.getElementById('mihomoGroupInfo').textContent = group
-    ? t('当前节点：') + (group.now || '—') + ' · ' + group.node_count + t(' 个候选项') : '';
-}
-
-async function loadMihomoGroups() {
-  const controllerInput = document.getElementById('rt_mihomo_controller');
-  const passwordInput = document.getElementById('mihomoPassword');
-  const select = document.getElementById('rt_mihomo_group');
-  const msg = document.getElementById('mihomoConnectionMsg');
-  const button = document.getElementById('connectMihomo');
-  const controller = controllerInput.value.trim(), secret = passwordInput.value;
-  const request = ++mihomoGroupRequest;
-  const body = { controller };
-  if (secret) body.secret = secret;
-  if (!controller) { msg.textContent = t('请先填写控制器地址'); return; }
-  button.disabled = true; msg.textContent = t('连接中…'); msg.style.color = 'var(--muted)';
-  const currentRequest = () => request === mihomoGroupRequest &&
-    controllerInput === document.getElementById('rt_mihomo_controller') &&
-    controllerInput.value.trim() === controller && passwordInput.value === secret;
-  try {
-    const res = await fetch('api/mihomo/groups', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!currentRequest()) return;
-    if (!res.ok) throw new Error(data.error || String(res.status));
-    if (!Array.isArray(data.groups)) throw new Error(t('控制器未返回策略组列表'));
-    mihomoGroups = data.groups;
-    const current = select.value;
-    select.innerHTML = '<option value="">请选择策略组</option>' +
-      (current && !mihomoGroups.some(g => g.name === current)
-        ? `<option value="${escapeHtml(current)}" selected disabled>${escapeHtml(current)}（未找到）</option>` : '') +
-      mihomoGroups.map(g => `<option value="${escapeHtml(g.name)}" ${g.name === current ? 'selected' : ''} ${g.selectable ? '' : 'disabled'}>${escapeHtml(g.name)} · ${escapeHtml(g.type)}${g.selectable ? '' : '（不支持手动切换）'}</option>`).join('');
-    select.value = current;
-    showMihomoGroup();
-    const available = mihomoGroups.filter(g => g.selectable).length;
-    msg.textContent = t('已连接：') + mihomoGroups.length + t(' 个策略组，') + available + t(' 个可选');
-    msg.style.color = available ? 'var(--ok)' : 'var(--muted)';
-  } catch (error) {
-    if (currentRequest()) { msg.textContent = t('连接失败：') + t(error.message); msg.style.color = 'var(--fail)'; }
-  } finally {
-    if (currentRequest()) button.disabled = false;
-  }
 }
 
 async function saveRtCfg() {
@@ -1880,6 +1772,7 @@ let pageSeq = 0;
 // 用户看到的只是抖动。要重新取数有「刷新」按钮，走 refreshPage()。
 async function switchPage(name, force = false) {
   if (!force && name === currentPage) return;
+  MihomoPage.unmount();
   const seq = ++pageSeq;
   currentPage = name;
 
@@ -1918,6 +1811,7 @@ async function switchPage(name, force = false) {
     document.getElementById('reqSize').onchange = () => { reqOffset = 0; loadReqs(); };
     await loadReqs();
   }
+  if (name === 'mihomo') await MihomoPage.mount();
   if (name === 'settings') {
     await loadRtCfg();
   }
@@ -1939,17 +1833,19 @@ const ICONS = {
   github: '<path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-1.96c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.17 1.18a11 11 0 015.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.5 11.5 0 0023.5 12C23.5 5.65 18.35.5 12 .5z"/>',
   star: '<path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>',
 };
+ICONS.mihomo = ICONS.proxies;
 const NAV = [
   ['dashboard', '概览'],
   ['requests', '请求记录'],
   ['proxies', '代理池'],
   ['cookies', 'Cookie 池'],
+  ['mihomo', '节点优选'],
   ['settings', '设置'],
   ['about', '关于'],
 ];
 const PAGE_TITLES = {
   dashboard: '概览', requests: '请求记录', proxies: '代理池', cookies: 'Cookie 池', settings: '设置',
-  about: '关于',
+  mihomo: '节点优选', about: '关于',
 };
 
 function toggleSidebar() {
@@ -2247,6 +2143,7 @@ const I18N_EN = {
   '概览': 'Overview',
   '请求记录': 'Requests',
   '代理池': 'Proxy Pool',
+  '节点优选': 'Node Optimization',
   'Cookie 池': 'Cookie Pool',
   '设置': 'Settings',
   '运行中': 'Running',

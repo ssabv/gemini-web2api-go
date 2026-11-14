@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/html"
@@ -205,11 +207,15 @@ func mihomoSecret() string {
 }
 
 type mihomoProxy struct {
-	Name  string   `json:"name"`
-	Type  string   `json:"type"`
-	Now   string   `json:"now"`
-	All   []string `json:"all"`
-	Alive *bool    `json:"alive"`
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	Now     string   `json:"now"`
+	All     []string `json:"all"`
+	Alive   *bool    `json:"alive"`
+	History []struct {
+		Delay int       `json:"delay"`
+		Time  time.Time `json:"time"`
+	} `json:"history"`
 }
 
 type mihomoGroup struct {
@@ -247,7 +253,11 @@ func listMihomoGroups(controller, secret string) ([]mihomoGroup, error) {
 
 // Direct controller requests must not inherit the proxy they are controlling.
 func mihomoRequest(client *http.Client, c RuntimeConfig, secret, method, path string, body io.Reader, out any) error {
-	req, err := http.NewRequest(method, strings.TrimRight(c.MihomoController, "/")+path, body)
+	return mihomoRequestContext(context.Background(), client, c, secret, method, path, body, out)
+}
+
+func mihomoRequestContext(ctx context.Context, client *http.Client, c RuntimeConfig, secret, method, path string, body io.Reader, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.MihomoController, "/")+path, body)
 	if err != nil {
 		return errors.New("mihomo controller URL is invalid")
 	}
@@ -275,6 +285,7 @@ func mihomoRequest(client *http.Client, c RuntimeConfig, secret, method, path st
 
 type mihomoSwitcher struct {
 	mu         sync.Mutex
+	generation atomic.Uint64
 	key        string
 	lastSwitch time.Time
 	lastNode   string
@@ -283,7 +294,7 @@ type mihomoSwitcher struct {
 
 var mihomoSwitches = &mihomoSwitcher{}
 
-func (s *mihomoSwitcher) switchNode(c RuntimeConfig, secret string, started time.Time) error {
+func (s *mihomoSwitcher) switchNode(c RuntimeConfig, secret string, generation uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := c.MihomoController + "\n" + c.MihomoGroup
@@ -305,7 +316,7 @@ func (s *mihomoSwitcher) switchNode(c RuntimeConfig, secret string, started time
 		return errors.New("mihomo group must be a nonempty Selector")
 	}
 	// Failures from a request that began on the old node share the completed switch.
-	if s.lastSwitch.After(started) && group.Now == s.lastNode {
+	if s.generation.Load() != generation && group.Now == s.lastNode {
 		return nil
 	}
 	now := time.Now()
@@ -333,13 +344,18 @@ func (s *mihomoSwitcher) switchNode(c RuntimeConfig, secret string, started time
 			break
 		}
 	}
+	ordered := make([]string, 0, len(names))
 	for i := 0; i < len(names); i++ {
-		name := strings.TrimSpace(names[(start+i)%len(names)])
+		ordered = append(ordered, names[(start+i)%len(names)])
+	}
+	if c.MihomoPreferLowLatency {
+		sortMihomoByLatency(ordered, pool.Proxies)
+	}
+	for _, candidate := range ordered {
+		name := strings.TrimSpace(candidate)
 		p, exists := pool.Proxies[name]
 		if !exists || p.Type == "" || !members[name] || name == group.Now || s.blocked[name].After(now) ||
-			len(p.All) > 0 || p.Type == "Selector" || p.Type == "URLTest" || p.Type == "Fallback" || p.Type == "LoadBalance" || p.Type == "Relay" ||
-			strings.EqualFold(p.Type, "direct") || strings.EqualFold(p.Type, "reject") || strings.EqualFold(p.Type, "rejectdrop") ||
-			strings.EqualFold(p.Type, "pass") || strings.EqualFold(p.Type, "dns") || strings.EqualFold(p.Type, "compatible") ||
+			!mihomoLeaf(p) ||
 			(p.Alive != nil && !*p.Alive) {
 			continue
 		}
@@ -355,13 +371,9 @@ func (s *mihomoSwitcher) switchNode(c RuntimeConfig, secret string, started time
 			return errors.New("mihomo controller did not confirm node selection")
 		}
 		s.lastSwitch, s.lastNode = time.Now(), name
+		s.generation.Add(1)
 		// Never delete /connections: only this process's idle proxy tunnels need renewal.
-		stdlibClientCache.Range(func(k, v any) bool {
-			if strings.HasPrefix(k.(string), c.MihomoProxyURL+"|") {
-				v.(*http.Client).CloseIdleConnections()
-			}
-			return true
-		})
+		closeMihomoIdleConnections(c.MihomoProxyURL)
 		logf("[mihomo] region unsupported: group=%q node=%q -> %q", c.MihomoGroup, group.Now, name)
 		return nil
 	}
@@ -372,7 +384,7 @@ func generateWithMihomoRecovery(generate func() (*StreamResult, error)) (*Stream
 	c := rtCfg()
 	secret := mihomoSecret()
 	for switches := 0; ; switches++ {
-		started := time.Now()
+		generation := mihomoSwitches.generation.Load()
 		res, err := generate()
 		if !c.MihomoAutoSwitch || !errors.Is(err, errGeminiRegion) || switches >= c.MihomoMaxSwitches ||
 			res == nil || res.ProxyID == 0 || res.Emitted != "" || res.EmittedReasoning != "" {
@@ -393,7 +405,7 @@ func generateWithMihomoRecovery(generate func() (*StreamResult, error)) (*Stream
 		if !matched {
 			return res, err
 		}
-		if switchErr := mihomoSwitches.switchNode(c, secret, started); switchErr != nil {
+		if switchErr := mihomoSwitches.switchNode(c, secret, generation); switchErr != nil {
 			logf("[mihomo] region recovery stopped: %v", switchErr)
 			return res, err
 		}

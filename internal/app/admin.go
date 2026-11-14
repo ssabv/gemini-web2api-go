@@ -636,7 +636,7 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case http.MethodPut:
-		var next RuntimeConfig
+		next := rtCfg()
 		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
