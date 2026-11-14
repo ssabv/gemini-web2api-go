@@ -461,6 +461,10 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 			if g.status != 200 {
 				b, _ := io.ReadAll(io.LimitReader(g.body, 4096))
 				g.body.Close()
+				if rtCfg().MihomoAutoSwitch && isGeminiRegionResponse(g.status, b, nil) {
+					getErr <- errGeminiRegion
+					return
+				}
 				getErr <- fmt.Errorf("processSession 下行 HTTP %d: %s", g.status, truncate(string(b), 200))
 				return
 			}
@@ -513,6 +517,9 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 		b, _ := io.ReadAll(io.LimitReader(resp.body, 4096))
 		resp.body.Close()
 		if resp.status != 200 {
+			if rtCfg().MihomoAutoSwitch && isGeminiRegionResponse(resp.status, b, nil) {
+				return errGeminiRegion
+			}
 			return fmt.Errorf("processSession 上行 ofs=%d HTTP %d: %s", ofs, resp.status, truncate(string(b), 200))
 		}
 		return nil

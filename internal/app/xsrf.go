@@ -187,6 +187,9 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 			return nil, err
 		}
 	}
+	if rtCfg().MihomoAutoSwitch && isGeminiRegionPage(body) {
+		return nil, errGeminiRegion
+	}
 	return body, nil
 }
 
