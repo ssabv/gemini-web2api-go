@@ -192,13 +192,11 @@ func (s *mihomoSwitcher) optimize(ctx context.Context, c RuntimeConfig, secret s
 		return
 	}
 	result.PreviousNode, result.Node = group.Now, group.Now
-	// The controller tests nodes without changing the selected group. A fresh zero
-	// or missing delay means unreachable; never mistake it for the fastest node.
-	var delays map[string]int
-	path := "/group/" + url.PathEscape(c.MihomoGroup) + "/delay?url=" + url.QueryEscape("https://www.gstatic.com/generate_204") + "&timeout=5000"
-	if mihomoRequestContext(ctx, client, c, secret, "GET", path, nil, &delays) != nil {
-		result.Reason = "latency_test_failed"
-		return
+	// Reuse the controller's latest measurement. Missing history or a latest
+	// failed measurement is not a usable latency; never trigger tests implicitly.
+	delays := make(map[string]int, len(group.All))
+	for _, name := range group.All {
+		delays[name] = mihomoDelay(pool.Proxies[name])
 	}
 	allowed := map[string]bool{}
 	if strings.TrimSpace(c.MihomoNodes) != "" {
@@ -383,7 +381,7 @@ func handleAdminMihomoConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAdminMihomoLatency(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 		return
 	}
@@ -408,11 +406,17 @@ func handleAdminMihomoLatency(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "group must be a Selector"})
 		return
 	}
-	var delays map[string]int
-	path := "/group/" + url.PathEscape(c.MihomoGroup) + "/delay?url=" + url.QueryEscape("https://www.gstatic.com/generate_204") + "&timeout=5000"
-	if err := mihomoRequestContext(r.Context(), client, c, mihomoSecret(), "GET", path, nil, &delays); err != nil {
-		writeJSON(w, 502, map[string]string{"error": err.Error()})
-		return
+	delays := make(map[string]int, len(group.All))
+	if r.Method == http.MethodPost {
+		path := "/group/" + url.PathEscape(c.MihomoGroup) + "/delay?url=" + url.QueryEscape("https://www.gstatic.com/generate_204") + "&timeout=5000"
+		if err := mihomoRequestContext(r.Context(), client, c, mihomoSecret(), "GET", path, nil, &delays); err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		for _, name := range group.All {
+			delays[name] = mihomoDelay(pool.Proxies[name])
+		}
 	}
 	type nodeDelay struct {
 		Name    string `json:"name"`

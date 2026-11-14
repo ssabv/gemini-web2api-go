@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,17 @@ import (
 	"testing"
 	"time"
 )
+
+func (f *fakeMihomo) setHistoryDelays(delays map[string]int) {
+	for name, delay := range delays {
+		p := f.proxies[name]
+		p.History = append(p.History, struct {
+			Delay int       `json:"delay"`
+			Time  time.Time `json:"time"`
+		}{Delay: delay})
+		f.proxies[name] = p
+	}
+}
 
 func TestMihomoRecoveryPrefersMeasuredLatency(t *testing.T) {
 	f, c := newFakeMihomo(t)
@@ -33,7 +45,8 @@ func TestMihomoRecoveryPrefersMeasuredLatency(t *testing.T) {
 func TestMihomoOptimizationFallbackAndBlock(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoProbeTimeoutSec, c.MihomoOptimizeIntervalMin = 5, 5
-	f.delays = map[string]int{"DIRECT": 1, "subgroup": 2, "old": 90, "last": 10, "next": 20}
+	f.setHistoryDelays(map[string]int{"DIRECT": 1, "subgroup": 2, "old": 90, "last": 10, "next": 20})
+	f.delayFailed = true // Existing history remains usable when active tests fail.
 	s := &mihomoSwitcher{}
 	var seen []string
 	r := s.optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error {
@@ -50,7 +63,7 @@ func TestMihomoOptimizationFallbackAndBlock(t *testing.T) {
 		t.Fatal("region failure was not cooled down")
 	}
 	r = s.optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error { return nil })
-	if !r.OK || r.Node != "next" || f.puts != 2 {
+	if !r.OK || r.Node != "next" || f.puts != 2 || f.delayRequests != 0 {
 		t.Fatalf("fastest healthy current node should not be reselected: %+v, puts=%d", r, f.puts)
 	}
 }
@@ -58,7 +71,7 @@ func TestMihomoOptimizationFallbackAndBlock(t *testing.T) {
 func TestMihomoOptimizationRestoresOnAllFailures(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoProbeTimeoutSec, c.MihomoOptimizeIntervalMin = 5, 5
-	f.delays = map[string]int{"last": 10, "next": 20, "old": 90}
+	f.setHistoryDelays(map[string]int{"last": 10, "next": 20, "old": 90})
 	r := (&mihomoSwitcher{}).optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error { return errors.New("failed") })
 	if r.OK || r.Node != "old" || f.now != "old" || f.puts != 3 || r.Attempts != 2 {
 		t.Fatalf("original node was not restored: %+v puts=%d", r, f.puts)
@@ -68,7 +81,7 @@ func TestMihomoOptimizationRestoresOnAllFailures(t *testing.T) {
 func TestMihomoOptimizationReportsUnconfirmedRestoration(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoProbeTimeoutSec = 5
-	f.delays = map[string]int{"last": 10}
+	f.setHistoryDelays(map[string]int{"last": 10})
 	f.rejectPut = true
 	r := (&mihomoSwitcher{}).optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error {
 		t.Fatal("selection failed, must not probe")
@@ -82,7 +95,7 @@ func TestMihomoOptimizationReportsUnconfirmedRestoration(t *testing.T) {
 func TestMihomoOptimizationRestoresAfterCancellation(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoProbeTimeoutSec, c.MihomoOptimizeIntervalMin = 5, 5
-	f.delays = map[string]int{"last": 10, "old": 90}
+	f.setHistoryDelays(map[string]int{"last": 10, "old": 90})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := (&mihomoSwitcher{}).optimize(ctx, c, "test-secret", func(context.Context, RuntimeConfig) error { cancel(); return ctx.Err() })
@@ -95,7 +108,8 @@ func TestMihomoOptimizationHonorsCandidatesAndZeroDelay(t *testing.T) {
 	f, c := newFakeMihomo(t)
 	c.MihomoProbeTimeoutSec, c.MihomoOptimizeIntervalMin = 5, 5
 	c.MihomoNodes = "last | next"
-	f.delays = map[string]int{"last": 0, "old": 1, "next": 30}
+	f.setHistoryDelays(map[string]int{"last": 1})
+	f.setHistoryDelays(map[string]int{"last": 0, "old": 1, "next": 30})
 	r := (&mihomoSwitcher{}).optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error { return nil })
 	if !r.OK || r.Node != "next" {
 		t.Fatalf("selected unreachable or unlisted node: %+v", r)
@@ -104,15 +118,42 @@ func TestMihomoOptimizationHonorsCandidatesAndZeroDelay(t *testing.T) {
 
 func TestMihomoOptimizationDoesNotSwitchWithoutMeasurements(t *testing.T) {
 	for _, failed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "all unreachable", true: "controller failed"}[failed], func(t *testing.T) {
+		t.Run(map[bool]string{false: "missing history", true: "controller failed"}[failed], func(t *testing.T) {
 			f, c := newFakeMihomo(t)
 			c.MihomoProbeTimeoutSec = 5
-			f.delayFailed = failed
+			f.unauthorized = failed
 			r := (&mihomoSwitcher{}).optimize(context.Background(), c, "test-secret", func(context.Context, RuntimeConfig) error { t.Fatal("must not probe"); return nil })
-			if r.OK || f.puts != 0 {
+			if r.OK || f.puts != 0 || f.delayRequests != 0 {
 				t.Fatalf("modified selector without usable latency: %+v", r)
 			}
 		})
+	}
+}
+
+func TestMihomoLatencyReadOnlyAndExplicitRefresh(t *testing.T) {
+	f, c := newFakeMihomo(t)
+	f.setHistoryDelays(map[string]int{"last": 10, "next": 20})
+	f.delays = map[string]int{"last": 100, "next": 50}
+	setMihomoTestConfig(t, c)
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		w := httptest.NewRecorder()
+		handleAdminMihomoLatency(w, httptest.NewRequest(method, "/admin/api/mihomo/latency", nil))
+		var data struct {
+			Nodes []struct {
+				Name    string `json:"name"`
+				DelayMS int    `json:"delay_ms"`
+			} `json:"nodes"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &data) != nil {
+			t.Fatalf("latency endpoint failed: %d %s", w.Code, w.Body.String())
+		}
+		want, tests := "last", 0
+		if method == http.MethodPost {
+			want, tests = "next", 1
+		}
+		if len(data.Nodes) == 0 || data.Nodes[0].Name != want || f.delayRequests != tests || f.puts != 0 {
+			t.Fatalf("%s: nodes=%v measurements=%d selections=%d", method, data.Nodes, f.delayRequests, f.puts)
+		}
 	}
 }
 

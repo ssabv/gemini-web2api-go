@@ -15,7 +15,7 @@ const MihomoPage = (() => {
 </div><div class="mo-actions"><button class="btn" id="connect" type="button">连接并获取策略组</button><button id="saveSecret" class="btn muted" type="button">保存密码</button><button id="clearSecret" class="btn muted" type="button">清除面板密码</button><span id="connectionMsg" role="status"></span></div></div>
 <div class="panel"><h2>自动优选</h2>
 <label class="mo-toggle"><input id="mihomo_auto_optimize" type="checkbox">定时选择最快节点并匿名验证</label>
-<p class="rthint">重新测速 → 从低延迟节点开始验证 → 收到 Gemini 回复后保留。匿名测试固定发送“Reply with OK only.”，不使用账号 Cookie。全部失败恢复原节点。</p>
+<p class="rthint">读取 mihomo 已有测速结果 → 从低延迟节点开始验证 → 收到 Gemini 回复后保留。优选不触发重新测速。匿名测试固定发送“Reply with OK only.”，不使用账号 Cookie。全部失败恢复原节点。</p>
 <div class="mo-grid" style="margin-top:20px">
 <div class="mo-field"><label for="mihomo_optimize_interval_min">检测间隔（分钟）</label><input id="mihomo_optimize_interval_min" type="number" min="1" max="1440" value="5"><p class="rthint">默认 5 分钟；启用后约 10 秒内开始首轮。</p></div>
 <div class="mo-field"><label for="mihomo_probe_timeout_sec">单节点匿名测试超时（秒）</label><input id="mihomo_probe_timeout_sec" type="number" min="5" max="60" value="20"><p class="rthint">不改变正常对话请求的超时。</p></div>
@@ -27,7 +27,7 @@ const MihomoPage = (() => {
 <p class="rthint">立即验证使用已保存的配置，成功后会切换并保留该节点。</p>
 </div>
 <div class="panel"><h2>运行状态</h2><div id="state" class="mo-status" role="status">正在读取…</div></div>
-<div class="panel"><h2>节点实测延迟</h2><button id="latency" class="btn muted" type="button">刷新延迟（不切换、不调用模型）</button><span id="latencyMsg" role="status"></span><div class="table-scroll"><table><thead><tr><th>节点</th><th>延迟</th><th>选择状态</th></tr></thead><tbody id="nodes"><tr><td colspan="3">点击刷新延迟查看。</td></tr></tbody></table></div></div>
+<div class="panel"><h2>已有测速结果</h2><button id="readCached" class="btn muted" type="button">读取已有结果</button><button id="latency" class="btn muted" type="button">重新测速（不切换、不调用模型）</button><span id="latencyMsg" role="status"></span><p class="rthint">优选使用 mihomo 最近一次的结果；没有测速记录或最近一次测速失败的节点跳过。只有点击「重新测速」才发起批量测速。</p><div class="table-scroll"><table><thead><tr><th>节点</th><th>延迟</th><th>选择状态</th></tr></thead><tbody id="nodes"><tr><td colspan="3">正在读取已有测速结果。</td></tr></tbody></table></div></div>
 <div class="panel"><h2>最近检测记录</h2><p class="rthint">显示本次启动以来最近 20 轮；不保存测试回复正文。</p><div class="table-scroll"><table><thead><tr><th>检测时间</th><th>结果 / 原因</th><th>最终节点</th><th>延迟 / 请求耗时</th></tr></thead><tbody id="history"></tbody></table></div></div>
 </div>`;
   }
@@ -166,6 +166,7 @@ const MihomoPage = (() => {
         $('secretState').textContent = data.secret_set ? '密码已保存，不回显。' : '密码尚未设置。';
       }
       renderStatus(data);
+      if (fill) await readLatency(false);
       return data;
     }
     async function busy(id, fn) {
@@ -174,7 +175,8 @@ const MihomoPage = (() => {
       try {
         await fn();
       } finally {
-        button.disabled = (id === 'run' && serverRunning) || (id === 'clearSecret' && !panelSecretSet);
+        button.disabled =
+          (id === 'run' && serverRunning) || (id === 'clearSecret' && !panelSecretSet);
       }
     }
     $('connect').onclick = () =>
@@ -239,35 +241,40 @@ const MihomoPage = (() => {
     $('run').onclick = () =>
       busy('run', async () => {
         actionRunning = true;
-        $('saveMsg').textContent = '正在测速并匿名验证…';
+        $('saveMsg').textContent = '正在读取已有延迟并匿名验证…';
         try {
           const r = await api('mihomo/optimize', { method: 'POST' });
           $('saveMsg').textContent = r.ok ? `验证成功：${r.node}，${r.delay_ms} ms` : outcome(r);
           await load();
+          await readLatency(false);
         } catch (e) {
           $('saveMsg').textContent = e.message;
         } finally {
           actionRunning = false;
         }
       });
-    $('latency').onclick = () =>
-      busy('latency', async () => {
-        $('latencyMsg').textContent = ' 正在测速…';
-        try {
-          const r = await api('mihomo/latency', { method: 'POST' });
-          rows(
-            'nodes',
-            r.nodes.map((n) => [
-              n.name,
-              n.delay_ms > 0 ? n.delay_ms + ' ms' : '未测通',
-              n.current ? '当前节点' : '',
-            ]),
-          );
-          $('latencyMsg').textContent = ' 测速完成；节点没有切换';
-        } catch (e) {
-          $('latencyMsg').textContent = ' ' + e.message;
-        }
-      });
+    async function readLatency(refresh) {
+      $('latencyMsg').textContent = refresh ? ' 正在重新测速…' : ' 正在读取已有结果…';
+      try {
+        const r = await api('mihomo/latency', { method: refresh ? 'POST' : 'GET' });
+        if (!active) return;
+        rows(
+          'nodes',
+          r.nodes.map((n) => [
+            n.name,
+            n.delay_ms > 0 ? n.delay_ms + ' ms' : '无有效结果',
+            n.current ? '当前节点' : '',
+          ]),
+        );
+        $('latencyMsg').textContent = refresh
+          ? ' 测速完成；节点没有切换'
+          : ' 已读取 mihomo 已有结果；未发起测速';
+      } catch (e) {
+        $('latencyMsg').textContent = ' ' + e.message;
+      }
+    }
+    $('latency').onclick = () => busy('latency', () => readLatency(true));
+    $('readCached').onclick = () => busy('readCached', () => readLatency(false));
 
     $('clearSecret').onclick = () =>
       busy('clearSecret', async () => {

@@ -79,6 +79,7 @@ type fakeMihomo struct {
 	proxies           map[string]mihomoProxy
 	delays            map[string]int
 	delayFailed       bool
+	delayRequests     int
 }
 
 func newFakeMihomo(t *testing.T) (*fakeMihomo, RuntimeConfig) {
@@ -111,6 +112,7 @@ func newFakeMihomo(t *testing.T) (*fakeMihomo, RuntimeConfig) {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"proxies": pool})
 		case r.Method == "GET" && r.URL.Path == "/group/"+c.MihomoGroup+"/delay":
+			f.delayRequests++
 			if f.delayFailed {
 				w.WriteHeader(500)
 				return
