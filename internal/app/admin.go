@@ -630,7 +630,9 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 				"cookie_file": cfg.CookieFile,
 				"admin_auth":  cfg.AdminToken != "",
 				// 面板的部署配置表要展示 Key 是否被启动参数锁死
-				"api_key_locked": apiKeyLocked,
+				"api_key_locked":           apiKeyLocked,
+				"mihomo_secret_set":        mihomoSecret() != "",
+				"mihomo_secret_from_panel": mihomoPanelSecretSet(),
 			},
 		})
 	case http.MethodPut:
@@ -647,6 +649,28 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}
+}
+
+// Credentials use a separate authenticated, write-only endpoint. Runtime config
+// reads and saves contain no secret; blank explicitly clears the panel override.
+func handleAdminMihomoSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Secret *string `json:"secret"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536))
+	if err := decoder.Decode(&req); err != nil || req.Secret == nil || len(*req.Secret) > 4096 || strings.ContainsAny(*req.Secret, "\r\n") {
+		writeJSON(w, 400, map[string]string{"error": "invalid mihomo secret request"})
+		return
+	}
+	if err := saveMihomoSecret(*req.Secret); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to save mihomo secret"})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true, "configured": mihomoSecret() != "", "panel_set": mihomoPanelSecretSet()})
 }
 
 func modelNamesSorted() []string {

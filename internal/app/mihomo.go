@@ -114,7 +114,45 @@ func validateMihomoConfig(c RuntimeConfig) error {
 	return nil
 }
 
+const mihomoSecretKey = "mihomo_controller_secret"
+
+var (
+	mihomoSecretMu    sync.RWMutex
+	mihomoPanelSecret string
+)
+
+func initMihomoSecret() {
+	mihomoSecretMu.Lock()
+	mihomoPanelSecret = kvGet(mihomoSecretKey)
+	mihomoSecretMu.Unlock()
+}
+
+func mihomoPanelSecretSet() bool {
+	mihomoSecretMu.RLock()
+	defer mihomoSecretMu.RUnlock()
+	return mihomoPanelSecret != ""
+}
+
+func saveMihomoSecret(secret string) error {
+	if len(secret) > 4096 || strings.ContainsAny(secret, "\r\n") {
+		return errors.New("mihomo secret is too long")
+	}
+	mihomoSecretMu.Lock()
+	defer mihomoSecretMu.Unlock()
+	if err := kvSet(mihomoSecretKey, secret); err != nil {
+		return err
+	}
+	mihomoPanelSecret = secret
+	return nil
+}
+
 func mihomoSecret() string {
+	mihomoSecretMu.RLock()
+	secret := mihomoPanelSecret
+	mihomoSecretMu.RUnlock()
+	if secret != "" {
+		return secret
+	}
 	if secret, ok := os.LookupEnv("MIHOMO_SECRET"); ok {
 		return secret
 	}

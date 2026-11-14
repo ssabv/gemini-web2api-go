@@ -1082,7 +1082,7 @@ const RT_GROUPS = [
     title: 'mihomo 地区限制切换',
     fields: [
       { k: 'mihomo_auto_switch', label: '地区不支持时自动换节点', type: 'bool',
-        hint: '默认关。仅在上游明确报告地区不支持、且请求走指定代理时切换指定的 Selector 组并重试。普通拒答、超时、限流和空响应不触发；已输出正文或思考时不重发。控制器 secret 在部署环境变量 MIHOMO_SECRET 或 config.json 的 mihomo_secret 设置，不在面板显示' },
+        hint: '默认关。仅在上游明确报告地区不支持、且请求走指定代理时切换指定的 Selector 组并重试。普通拒答、超时、限流和空响应不触发；已输出正文或思考时不重发。控制器密码在下方单独保存，不回显' },
       { k: 'mihomo_controller', label: '控制器地址', type: 'text',
         hint: 'external-controller 的 HTTP/HTTPS 地址，例如 http://mihomo:9090；不是代理端口，不要在地址里填密码' },
       { k: 'mihomo_group', label: 'Gemini 策略组', type: 'text',
@@ -1148,6 +1148,18 @@ async function loadRtCfg() {
       <h3>${escapeHtml(g.title)}</h3>
       ${inputs.length ? `<div class="cfg-grid">${inputs.map(inputItem).join('')}</div>` : ''}
       ${toggles.length ? `<div class="cfg-toggles${inputs.length ? ' after-grid' : ''}">${toggles.map(toggleItem).join('')}</div>` : ''}
+      ${g.fields.some(f => f.k === 'mihomo_auto_switch') ? `
+        <div class="cfg-item wide" style="margin-top:16px">
+          <label for="mihomoPassword">控制器密码（secret）</label>
+          <input type="password" id="mihomoPassword" autocomplete="new-password"
+            placeholder="${data.deploy?.mihomo_secret_set ? '已设置，输入新密码可替换' : '未设置'}">
+          <div class="rthint">密码单独保存，留空不修改，保存后立即生效并在重启后保留。面板密码优先于环境变量 MIHOMO_SECRET；清除面板密码后恢复环境变量或启动配置。</div>
+          <div style="margin-top:8px">
+            <button type="button" class="btn" onclick="saveMihomoPassword()">保存密码</button>
+            <button type="button" class="btn" id="clearMihomoPassword" onclick="saveMihomoPassword(true)" ${data.deploy?.mihomo_secret_from_panel ? '' : 'disabled'}>清除面板密码</button>
+            <span id="mihomoPasswordMsg" style="font-size:12.5px;margin-left:8px"></span>
+          </div>
+        </div>` : ''}
     </div>`;
   }).join('');
 
@@ -1164,6 +1176,28 @@ async function loadRtCfg() {
                                  : '<span class="badge ok">面板可轮换</span>', 'compose 的 API_KEY'],
   ].map(r => `<tr><td title="${escapeHtml(r[2])}">${r[0]}</td>
       <td class="pre" style="word-break:break-all;">${r[1]}</td></tr>`).join('');
+}
+
+async function saveMihomoPassword(clear = false) {
+  const input = document.getElementById('mihomoPassword');
+  const msg = document.getElementById('mihomoPasswordMsg');
+  const secret = clear ? '' : input.value;
+  if (!clear && !secret) { msg.textContent = t('请输入密码；留空不修改'); return; }
+  msg.textContent = t('保存中…'); msg.style.color = 'var(--muted)';
+  try {
+    const res = await fetch('api/mihomo/secret', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { throw new Error(data.error || String(res.status)); }
+    input.value = '';
+    input.placeholder = data.configured ? t('已设置，输入新密码可替换') : t('未设置');
+    document.getElementById('clearMihomoPassword').disabled = !data.panel_set;
+    msg.textContent = t(clear ? '已清除面板密码' : '已保存并生效'); msg.style.color = 'var(--ok)';
+  } catch (error) {
+    msg.textContent = t('保存失败：') + t(error.message); msg.style.color = 'var(--fail)';
+  }
 }
 
 async function saveRtCfg() {

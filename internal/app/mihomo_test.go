@@ -307,3 +307,101 @@ func TestMihomoConfigAndCredentialIsolation(t *testing.T) {
 		t.Fatal("environment credential not used")
 	}
 }
+
+func isolateMihomoPanelSecret(t *testing.T) {
+	t.Helper()
+	oldKV := kvGet(mihomoSecretKey)
+	mihomoSecretMu.Lock()
+	oldPanel := mihomoPanelSecret
+	mihomoPanelSecret = ""
+	mihomoSecretMu.Unlock()
+	oldAdmin := cfg.AdminToken
+	if err := kvSet(mihomoSecretKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AdminToken = "admin-test-token"
+	t.Cleanup(func() {
+		kvSet(mihomoSecretKey, oldKV)
+		mihomoSecretMu.Lock()
+		mihomoPanelSecret = oldPanel
+		mihomoSecretMu.Unlock()
+		cfg.AdminToken = oldAdmin
+	})
+}
+
+func TestMihomoPanelSecretPersistenceAndNoDisclosure(t *testing.T) {
+	isolateMihomoPanelSecret(t)
+	t.Setenv("MIHOMO_SECRET", "environment-test-password")
+	body := `{"secret":"panel-test-password"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/admin/api/mihomo/secret", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer admin-test-token")
+	requireAuth(handleAdminMihomoSecret)(w, r)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "panel-test-password") {
+		t.Fatalf("secret save response: %d %s", w.Code, w.Body.String())
+	}
+	if mihomoSecret() != "panel-test-password" {
+		t.Fatal("panel password did not override environment")
+	}
+	// Clearing only the in-memory value simulates startup loading from persistence.
+	mihomoSecretMu.Lock()
+	mihomoPanelSecret = ""
+	mihomoSecretMu.Unlock()
+	initMihomoSecret()
+	if mihomoSecret() != "panel-test-password" {
+		t.Fatal("saved password did not survive restart")
+	}
+	w = httptest.NewRecorder()
+	handleAdminConfig(w, httptest.NewRequest("GET", "/admin/api/config", nil))
+	if strings.Contains(w.Body.String(), "panel-test-password") || strings.Contains(w.Body.String(), "environment-test-password") {
+		t.Fatal("config read disclosed secret")
+	}
+	var got struct {
+		Deploy struct {
+			Set   bool `json:"mihomo_secret_set"`
+			Panel bool `json:"mihomo_secret_from_panel"`
+		} `json:"deploy"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Deploy.Set || !got.Deploy.Panel {
+		t.Fatal("missing password status")
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("PUT", "/admin/api/mihomo/secret", strings.NewReader(`{"secret":""}`))
+	r.Header.Set("Authorization", "Bearer admin-test-token")
+	requireAuth(handleAdminMihomoSecret)(w, r)
+	initMihomoSecret()
+	if w.Code != 200 || mihomoPanelSecretSet() || mihomoSecret() != "environment-test-password" {
+		t.Fatal("clearing override did not restore environment")
+	}
+}
+
+func TestMihomoPanelSecretRequiresExplicitAuthenticatedWrite(t *testing.T) {
+	isolateMihomoPanelSecret(t)
+	for _, tc := range []struct {
+		name, method, body string
+		auth               bool
+		status             int
+	}{
+		{"unauthorized", "PUT", `{"secret":"rejected-password"}`, false, 401},
+		{"read", "GET", "", true, 405},
+		{"missing field", "PUT", `{}`, true, 400},
+		{"malformed", "PUT", `{"secret":"rejected-password"`, true, 400},
+		{"invalid header", "PUT", `{"secret":"rejected\npassword"}`, true, 400},
+		{"too long", "PUT", `{"secret":"` + strings.Repeat("x", 4097) + `"}`, true, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(tc.method, "/admin/api/mihomo/secret", strings.NewReader(tc.body))
+			if tc.auth {
+				r.Header.Set("Authorization", "Bearer admin-test-token")
+			}
+			requireAuth(handleAdminMihomoSecret)(w, r)
+			if w.Code != tc.status || mihomoPanelSecretSet() || kvGet(mihomoSecretKey) != "" {
+				t.Fatalf("rejected request changed password: status %d", w.Code)
+			}
+			if strings.Contains(w.Body.String(), "rejected-password") {
+				t.Fatal("error disclosed attempted password")
+			}
+		})
+	}
+}
