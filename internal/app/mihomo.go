@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -97,11 +98,18 @@ func isGeminiRegionPage(body []byte) bool {
 	}
 }
 
-func validateMihomoConfig(c RuntimeConfig) error {
-	u, err := url.Parse(c.MihomoController)
+func validateMihomoController(controller string) error {
+	u, err := url.Parse(controller)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("mihomo_controller must be an HTTP/HTTPS URL without credentials or query")
+	}
+	return nil
+}
+
+func validateMihomoConfig(c RuntimeConfig) error {
+	if err := validateMihomoController(c.MihomoController); err != nil {
+		return err
 	}
 	p, err := url.Parse(c.MihomoProxyURL)
 	if err != nil || p.Host == "" || (p.Scheme != "http" && p.Scheme != "https" && p.Scheme != "socks5" && p.Scheme != "socks5h") ||
@@ -165,6 +173,39 @@ type mihomoProxy struct {
 	Now   string   `json:"now"`
 	All   []string `json:"all"`
 	Alive *bool    `json:"alive"`
+}
+
+type mihomoGroup struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Now        string `json:"now"`
+	NodeCount  int    `json:"node_count"`
+	Selectable bool   `json:"selectable"`
+}
+
+// Discovery only reads the controller and returns group metadata, never credentials
+// or node configurations. It works before automatic switching is configured.
+func listMihomoGroups(controller, secret string) ([]mihomoGroup, error) {
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	var pool struct {
+		Proxies map[string]mihomoProxy `json:"proxies"`
+	}
+	if err := mihomoRequest(client, RuntimeConfig{MihomoController: controller}, secret, "GET", "/proxies", nil, &pool); err != nil {
+		return nil, err
+	}
+	groups := make([]mihomoGroup, 0)
+	for name, proxy := range pool.Proxies {
+		switch proxy.Type {
+		case "Selector", "URLTest", "Fallback", "LoadBalance", "Relay":
+			groups = append(groups, mihomoGroup{Name: name, Type: proxy.Type, Now: proxy.Now,
+				NodeCount: len(proxy.All), Selectable: proxy.Type == "Selector"})
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
+	return groups, nil
 }
 
 // Direct controller requests must not inherit the proxy they are controlling.

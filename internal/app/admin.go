@@ -673,6 +673,41 @@ func handleAdminMihomoSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true, "configured": mihomoSecret() != "", "panel_set": mihomoPanelSecretSet()})
 }
 
+func handleAdminMihomoGroups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Controller string  `json:"controller"`
+		Secret     *string `json:"secret"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536))
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid mihomo connection request"})
+		return
+	}
+	req.Controller = strings.TrimSpace(req.Controller)
+	if err := validateMihomoController(req.Controller); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	secret := mihomoSecret()
+	if req.Secret != nil {
+		if len(*req.Secret) > 4096 || strings.ContainsAny(*req.Secret, "\r\n") {
+			writeJSON(w, 400, map[string]string{"error": "invalid mihomo secret"})
+			return
+		}
+		secret = *req.Secret
+	}
+	groups, err := listMihomoGroups(req.Controller, secret)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"groups": groups})
+}
+
 func modelNamesSorted() []string {
 	var names []string
 	for n := range availableModels() {

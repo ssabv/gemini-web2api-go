@@ -1085,8 +1085,8 @@ const RT_GROUPS = [
         hint: '默认关。仅在上游明确报告地区不支持、且请求走指定代理时切换指定的 Selector 组并重试。普通拒答、超时、限流和空响应不触发；已输出正文或思考时不重发。控制器密码在下方单独保存，不回显' },
       { k: 'mihomo_controller', label: '控制器地址', type: 'text',
         hint: 'external-controller 的 HTTP/HTTPS 地址，例如 http://mihomo:9090；不是代理端口，不要在地址里填密码' },
-      { k: 'mihomo_group', label: 'Gemini 策略组', type: 'text',
-        hint: '填负责 Gemini 出口的手动选择组名称，只切这个组；不支持自动选择或负载均衡组。新协议的 geminiweb-pa.clients6.google.com 也须路由到此组' },
+      { k: 'mihomo_group', label: 'Gemini 策略组', type: 'mihomo-group',
+        hint: '连接控制器后选择负责 Gemini 出口的手动选择组。自动选择或负载均衡组仅显示，不可选。新协议的 geminiweb-pa.clients6.google.com 也须路由到此组' },
       { k: 'mihomo_proxy_url', label: '对应代理地址', type: 'text',
         hint: '与代理池里的 URL 完全一致，例如 http://mihomo:7890；其他代理或直连报错不会触发切换' },
       { k: 'mihomo_nodes', label: '候选节点（可选）', type: 'textarea', wide: true,
@@ -1108,17 +1108,23 @@ const RT_GROUPS = [
 ];
 
 let rtCfgCache = null, rtModels = [];
+let mihomoGroups = [], mihomoGroupRequest = 0;
 
 async function loadRtCfg() {
   const data = await api('api/config');
   if (!data) return;
   rtCfgCache = data.config; rtModels = data.models || [];
+  mihomoGroups = []; ++mihomoGroupRequest;
   // 每组先放输入框类字段（自适应多列网格），开关单独成行排在下面：开关的说明普遍
   // 很长，塞进网格的窄列里标签会被挤成一字一行。
   const inputItem = f => {
     const v = rtCfgCache[f.k];
     let input;
-    if (f.type === 'select') {
+    if (f.type === 'mihomo-group') {
+      input = `<select id="rt_${f.k}" onchange="showMihomoGroup()"><option value="">连接后选择策略组</option>` +
+        (v ? `<option value="${escapeHtml(v)}" selected>${escapeHtml(v)}（已保存，待连接核对）</option>` : '') + '</select>' +
+        '<div id="mihomoGroupInfo" class="rthint"></div>';
+    } else if (f.type === 'select') {
       input = `<select id="rt_${f.k}">` + rtModels.map(m =>
         `<option value="${escapeHtml(m)}" ${m === v ? 'selected' : ''}>${escapeHtml(m)}</option>`
       ).join('') + '</select>';
@@ -1159,9 +1165,16 @@ async function loadRtCfg() {
             <button type="button" class="btn" id="clearMihomoPassword" onclick="saveMihomoPassword(true)" ${data.deploy?.mihomo_secret_from_panel ? '' : 'disabled'}>清除面板密码</button>
             <span id="mihomoPasswordMsg" style="font-size:12.5px;margin-left:8px"></span>
           </div>
+          <div style="margin-top:8px">
+            <button type="button" class="btn" id="connectMihomo" onclick="loadMihomoGroups()">连接并获取策略组</button>
+            <span id="mihomoConnectionMsg" style="font-size:12.5px;margin-left:8px"></span>
+          </div>
+          <div class="rthint">连接只读取列表，不切换节点、不保存配置。输入了密码就用该密码测试；留空则用已保存的密码。新密码测试成功后仍需单独保存。</div>
         </div>` : ''}
     </div>`;
   }).join('');
+  document.getElementById('rt_mihomo_controller').addEventListener('input', invalidateMihomoGroups);
+  document.getElementById('mihomoPassword').addEventListener('input', invalidateMihomoGroups);
 
   // 三列（项/值/怎么改）挤在窄栏里读不动，第三列换成 title 悬浮
   const d = data.deploy || {};
@@ -1192,11 +1205,70 @@ async function saveMihomoPassword(clear = false) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) { throw new Error(data.error || String(res.status)); }
     input.value = '';
+    invalidateMihomoGroups();
     input.placeholder = data.configured ? t('已设置，输入新密码可替换') : t('未设置');
     document.getElementById('clearMihomoPassword').disabled = !data.panel_set;
     msg.textContent = t(clear ? '已清除面板密码' : '已保存并生效'); msg.style.color = 'var(--ok)';
   } catch (error) {
     msg.textContent = t('保存失败：') + t(error.message); msg.style.color = 'var(--fail)';
+  }
+}
+
+function invalidateMihomoGroups() {
+  ++mihomoGroupRequest; mihomoGroups = [];
+  const select = document.getElementById('rt_mihomo_group');
+  const current = select.value;
+  select.innerHTML = '<option value="">连接后选择策略组</option>' +
+    (current ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}（待重新连接核对）</option>` : '');
+  document.getElementById('mihomoGroupInfo').textContent = '';
+  document.getElementById('mihomoConnectionMsg').textContent = t('请连接控制器获取列表');
+  document.getElementById('connectMihomo').disabled = false;
+}
+
+function showMihomoGroup() {
+  const group = mihomoGroups.find(g => g.name === document.getElementById('rt_mihomo_group').value);
+  document.getElementById('mihomoGroupInfo').textContent = group
+    ? t('当前节点：') + (group.now || '—') + ' · ' + group.node_count + t(' 个候选项') : '';
+}
+
+async function loadMihomoGroups() {
+  const controllerInput = document.getElementById('rt_mihomo_controller');
+  const passwordInput = document.getElementById('mihomoPassword');
+  const select = document.getElementById('rt_mihomo_group');
+  const msg = document.getElementById('mihomoConnectionMsg');
+  const button = document.getElementById('connectMihomo');
+  const controller = controllerInput.value.trim(), secret = passwordInput.value;
+  const request = ++mihomoGroupRequest;
+  const body = { controller };
+  if (secret) body.secret = secret;
+  if (!controller) { msg.textContent = t('请先填写控制器地址'); return; }
+  button.disabled = true; msg.textContent = t('连接中…'); msg.style.color = 'var(--muted)';
+  const currentRequest = () => request === mihomoGroupRequest &&
+    controllerInput === document.getElementById('rt_mihomo_controller') &&
+    controllerInput.value.trim() === controller && passwordInput.value === secret;
+  try {
+    const res = await fetch('api/mihomo/groups', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!currentRequest()) return;
+    if (!res.ok) throw new Error(data.error || String(res.status));
+    if (!Array.isArray(data.groups)) throw new Error(t('控制器未返回策略组列表'));
+    mihomoGroups = data.groups;
+    const current = select.value;
+    select.innerHTML = '<option value="">请选择策略组</option>' +
+      (current && !mihomoGroups.some(g => g.name === current)
+        ? `<option value="${escapeHtml(current)}" selected disabled>${escapeHtml(current)}（未找到）</option>` : '') +
+      mihomoGroups.map(g => `<option value="${escapeHtml(g.name)}" ${g.name === current ? 'selected' : ''} ${g.selectable ? '' : 'disabled'}>${escapeHtml(g.name)} · ${escapeHtml(g.type)}${g.selectable ? '' : '（不支持手动切换）'}</option>`).join('');
+    select.value = current;
+    showMihomoGroup();
+    const available = mihomoGroups.filter(g => g.selectable).length;
+    msg.textContent = t('已连接：') + mihomoGroups.length + t(' 个策略组，') + available + t(' 个可选');
+    msg.style.color = available ? 'var(--ok)' : 'var(--muted)';
+  } catch (error) {
+    if (currentRequest()) { msg.textContent = t('连接失败：') + t(error.message); msg.style.color = 'var(--fail)'; }
+  } finally {
+    if (currentRequest()) button.disabled = false;
   }
 }
 

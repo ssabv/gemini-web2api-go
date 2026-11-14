@@ -149,6 +149,7 @@ func Run() {
 		mux.HandleFunc("/admin/api/usage", requireAuth(handleAdminUsage))
 		mux.HandleFunc("/admin/api/config", requireAuth(handleAdminConfig))
 		mux.HandleFunc("/admin/api/mihomo/secret", requireAuth(handleAdminMihomoSecret))
+		mux.HandleFunc("/admin/api/mihomo/groups", requireAuth(handleAdminMihomoGroups))
 		mux.HandleFunc("/admin/api/cookies", requireAuth(handleAdminCookies))
 		mux.HandleFunc("/admin/api/cookies/", requireAuth(handleAdminCookieItem))
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))

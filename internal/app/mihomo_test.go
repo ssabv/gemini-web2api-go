@@ -405,3 +405,128 @@ func TestMihomoPanelSecretRequiresExplicitAuthenticatedWrite(t *testing.T) {
 		})
 	}
 }
+
+func TestMihomoGroupDiscoveryReadOnlyAndSecretIsolation(t *testing.T) {
+	isolateMihomoPanelSecret(t)
+	if err := saveMihomoSecret("saved-test-password"); err != nil {
+		t.Fatal(err)
+	}
+	oldRuntime := rtCfg()
+	requests := 0
+	wantSecret := "saved-test-password"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != "GET" || r.URL.Path != "/proxies" || r.Header.Get("Authorization") != "Bearer "+wantSecret {
+			t.Error("unexpected controller request")
+			w.WriteHeader(401)
+			return
+		}
+		body := `{"proxies":{"z 手动":{"type":"Selector","now":"node-a","all":["node-a","node-b"],"password":"hidden-node-password"},"a 自动":{"type":"URLTest","now":"node-a","all":["node-a"]},"空组":{"type":"Selector","all":[]},"node-a":{"type":"Vless","server":"private-node-server"}},"secret":"hidden-controller-password"}`
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	for _, temporary := range []bool{false, true} {
+		body := map[string]any{"controller": srv.URL}
+		if temporary {
+			wantSecret = "temporary-test-password"
+			body["secret"] = wantSecret
+		}
+		encoded, _ := json.Marshal(body)
+		r := httptest.NewRequest("POST", "/admin/api/mihomo/groups", strings.NewReader(string(encoded)))
+		r.Header.Set("Authorization", "Bearer admin-test-token")
+		w := httptest.NewRecorder()
+		requireAuth(handleAdminMihomoGroups)(w, r)
+		if w.Code != 200 {
+			t.Fatalf("discovery failed: %d %s", w.Code, w.Body.String())
+		}
+		for _, hidden := range []string{"password", "private-node-server", "Vless", "server"} {
+			if strings.Contains(w.Body.String(), hidden) {
+				t.Fatal("discovery disclosed controller or node configuration")
+			}
+		}
+		var got struct {
+			Groups []mihomoGroup `json:"groups"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got.Groups) != 3 {
+			t.Fatalf("unexpected group list: %s", w.Body.String())
+		}
+		if got.Groups[0].Name != "a 自动" || got.Groups[0].Selectable || got.Groups[1].Name != "z 手动" ||
+			!got.Groups[1].Selectable || got.Groups[1].NodeCount != 2 || got.Groups[1].Now != "node-a" {
+			t.Fatal("incorrect group metadata or ordering")
+		}
+		if mihomoSecret() != "saved-test-password" || kvGet(mihomoSecretKey) != "saved-test-password" || rtCfg() != oldRuntime {
+			t.Fatal("discovery modified credentials or runtime configuration")
+		}
+	}
+	if requests != 2 {
+		t.Fatal("unexpected number of controller requests")
+	}
+}
+
+func TestMihomoGroupDiscoveryRejectsInvalidAndUnauthenticatedRequests(t *testing.T) {
+	isolateMihomoPanelSecret(t)
+	for _, tc := range []struct {
+		method, body string
+		auth         bool
+		status       int
+	}{
+		{"POST", `{"controller":"http://controller"}`, false, 401},
+		{"GET", "", true, 405},
+		{"POST", `{`, true, 400},
+		{"POST", `{}`, true, 400},
+		{"POST", `{"controller":"ftp://controller"}`, true, 400},
+		{"POST", `{"controller":"http://user:attempted-password@controller"}`, true, 400},
+		{"POST", `{"controller":"http://controller?secret=attempted-password"}`, true, 400},
+		{"POST", `{"controller":"http://controller#attempted-password"}`, true, 400},
+		{"POST", `{"controller":"http://controller","secret":"attempted-password\n"}`, true, 400},
+		{"POST", `{"controller":"http://controller","secret":"` + strings.Repeat("x", 4097) + `"}`, true, 400},
+	} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(tc.method, "/admin/api/mihomo/groups", strings.NewReader(tc.body))
+		if tc.auth {
+			r.Header.Set("Authorization", "Bearer admin-test-token")
+		}
+		requireAuth(handleAdminMihomoGroups)(w, r)
+		if w.Code != tc.status || strings.Contains(w.Body.String(), "attempted-password") || mihomoPanelSecretSet() {
+			t.Fatalf("unexpected rejection response: %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestMihomoGroupDiscoveryControllerFailuresAndEmptyList(t *testing.T) {
+	isolateMihomoPanelSecret(t)
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{"unauthorized", 401, "hidden-upstream-password", 502},
+		{"invalid JSON", 200, "hidden-upstream-password", 502},
+		{"empty", 200, `{"proxies":{}}`, 200},
+		{"redirect", 302, "hidden-upstream-password", 502},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" || r.URL.Path != "/proxies" {
+					t.Error("discovery followed a redirect or changed nodes")
+				}
+				w.Header().Set("Location", "/not-allowed")
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			body, _ := json.Marshal(map[string]string{"controller": srv.URL})
+			r := httptest.NewRequest("POST", "/admin/api/mihomo/groups", strings.NewReader(string(body)))
+			r.Header.Set("Authorization", "Bearer admin-test-token")
+			w := httptest.NewRecorder()
+			requireAuth(handleAdminMihomoGroups)(w, r)
+			if w.Code != tc.want || strings.Contains(w.Body.String(), "hidden-upstream-password") {
+				t.Fatalf("unexpected response: %d %s", w.Code, w.Body.String())
+			}
+			if tc.want == 200 && strings.TrimSpace(w.Body.String()) != `{"groups":[]}` {
+				t.Fatal("empty list must be a JSON array")
+			}
+		})
+	}
+}
