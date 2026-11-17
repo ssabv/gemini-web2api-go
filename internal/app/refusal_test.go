@@ -108,6 +108,64 @@ func TestRefusalCallGate(t *testing.T) {
 	}
 }
 
+// Validate tool calls before releasing output buffered for refusal checks.
+func TestRefusalToolCallValidation(t *testing.T) {
+	old := generateGeminiFiles
+	t.Cleanup(func() { generateGeminiFiles = old })
+	tools := []map[string]interface{}{{"type": "function", "function": map[string]interface{}{"name": "get_time"}}}
+	for _, enabled := range []bool{false, true} {
+		for _, streaming := range []bool{false, true} {
+			for _, tc := range []struct {
+				name, reply, wantText string
+				wantCalls             int
+				wantError             bool
+			}{
+				{"malformed", "```tool_call\n{\"name\":\n```", "", 0, true},
+				{"missing_name", "```tool_call\n{\"arguments\":{}}\n```", "", 0, true},
+				{"valid", "```tool_call\n{\"name\":\"get_time\",\"arguments\":{}}\n```", "", 1, false},
+				{"text_with_bad_call", "Normal reply\n```tool_call\n{\"name\":\n```", "Normal reply", 0, false},
+			} {
+				t.Run(fmt.Sprintf("check=%v/stream=%v/%s", enabled, streaming, tc.name), func(t *testing.T) {
+					generateGeminiFiles = func(_, _ string, _ ModelConfig, _ []pendingUpload, delta, reason func(string)) (*StreamResult, error) {
+						if delta != nil {
+							delta(tc.reply)
+						}
+						if reason != nil {
+							reason("reasoning")
+						}
+						return &StreamResult{Raw: refusalTestFrame(tc.reply)}, nil
+					}
+					var emitted, reasoning strings.Builder
+					var delta, reason func(string)
+					if streaming {
+						delta = func(s string) { emitted.WriteString(s) }
+						reason = func(s string) { reasoning.WriteString(s) }
+					}
+					text, calls, _, err := callGeminiChecked("prompt", "prompt", Models["gemini-3.6-flash"], tools, nil, delta, reason, enabled)
+					if tc.wantError {
+						if err == nil || !strings.Contains(err.Error(), "unparseable tool_call") || text != "" || len(calls) != 0 {
+							t.Fatalf("bad tool call accepted: text=%q calls=%d err=%v", text, len(calls), err)
+						}
+						if enabled && (emitted.Len() != 0 || reasoning.Len() != 0) {
+							t.Fatalf("rejected output escaped: text=%q reasoning=%q", emitted.String(), reasoning.String())
+						}
+						return
+					}
+					if err != nil || text != tc.wantText || len(calls) != tc.wantCalls {
+						t.Fatalf("valid reply changed: text=%q calls=%d err=%v", text, len(calls), err)
+					}
+					if tc.wantCalls > 0 && calls[0].Function.Name != "get_time" {
+						t.Fatalf("wrong tool: %+v", calls)
+					}
+					if streaming && (emitted.String() != tc.reply || reasoning.String() != "reasoning") {
+						t.Fatalf("accepted output not released: text=%q reasoning=%q", emitted.String(), reasoning.String())
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestRefusalHTTPAndNormalStreaming(t *testing.T) {
 	setRefusalCheck(t, true)
 	old := generateGeminiFiles
