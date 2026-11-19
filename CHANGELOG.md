@@ -2,6 +2,37 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 4.31.0
+
+上游把 3.1 Pro 的位置换成了新模型 **4 Neon**（网页上描述是「Deeper analysis」）。2026-11-19 付费号的模型选择器是
+Auto（3.5 Flash-Lite）/ 4 Hydrogen / 4 Neon / 4 Carbon。
+
+### 新增
+
+- **`gemini-4-neon` / `gemini-4-neon-thinking`（#84）**。要付费 / Ultra 号的 cookie。实测普通档回报 `4 Neon`，思考版回报
+  `4 Neon High` 并带 `reasoning_content`。Neon 不是 Argon 的继任者：Argon 改名成了 Carbon，`gemini-4-argon` 仍落到 4 Carbon。
+- **`request_timeout_sec` 上限从 600 提到 1200 秒（#83）**。总超时不会被持续输出重置，Carbon 长思考 + 长输出能跑过 600 秒。
+  卡住不出字的请求由 4.30.0 的 `stream_idle_timeout_sec` 掐断，放宽上限不会让它们白等。
+
+### 修复
+
+- **`gemini-3.1-pro` / `-thinking` 恢复可用，现在是 `gemini-4-neon` 的旧名称**。4.29.0 把它们当成已下线、直接返回 400，
+  当时付费号请求 3.1 Pro 被换成 3.5 Flash-Lite、清单里也还没有 Neon；现在同一个位置上是 4 Neon，继续拦等于把 Neon 拦在门外。
+  开着 `strict_model` 时 `3.1 Pro` 和 `4 Neon` 两个回报名互认。
+- 文档更正：免费号请求 `gemini-4-carbon` 现在拿到的是 4 Hydrogen，不再是 3.5 Flash-Lite。
+
+## 4.30.0
+
+### 新增
+
+- **流式空闲超时 `stream_idle_timeout_sec`（#81）**。上游开流后连续这么多秒一个 chunk 都不来，就掐断当瞬时错误重试。
+  「上游超时」（`request_timeout_sec`）是整条请求的总时限，管不到「首字节两秒就到、之后两三分钟一个字不来」这种挂法——
+  报告里实测这样挂了 254 秒、输出 0。新开关专补这个缺口：卡住的请求几十秒就换一次，而不是干等到总超时。掐断后无条件重试
+  （跟空响应重发一个路子，不受「超时后重试」开关影响），所以它触发时首字节其实已经来过、出口是通的，不计进代理健康度。
+  只老协议（StreamGenerate）生效——新协议 processSession 的下行长轮询本就约 60 秒空闲一次，装了会误杀。0=关（默认），建议 60。
+  这是 #72（4.28.1 修的「零输出返 200」）在流式下的残留：非流式早已报错，流式一旦开了流（保活或首帧）状态码就锁 200，
+  这版靠「早掐早重试」在还没吐内容时换一次拿到真结果。
+
 ## 4.29.0
 
 2026-11 上游 Gemini 网页端换了一轮模型，这版跟着改。实测：付费号的模型选择器里只剩 3.5 Flash-Lite / 4 Hydrogen /
