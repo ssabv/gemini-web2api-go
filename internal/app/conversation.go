@@ -227,6 +227,50 @@ func getAnonSession(proxyURL string) (string, error) {
 	return strings.Join(pairs, "; "), nil
 }
 
+// convAccountUnusableError 是会话绑定的登录号取不到 XSRF：cookie 失效或被拦。
+// 新会话据此换下一个号；续接的会话绑死在这个号上，只能报错。
+type convAccountUnusableError struct {
+	AccountID int64
+	Err       error
+}
+
+func (e *convAccountUnusableError) Error() string { return "取 XSRF 失败: " + e.Err.Error() }
+func (e *convAccountUnusableError) Unwrap() error { return e.Err }
+
+// convXSRF 给登录态会话取 XSRF，失败时的处理跟单轮路径（gemini.go 挑号那段）一致：
+// 先强制轮转一次再重取，救回来就把新 cookie 换进会话；救不回来且是 cookie 的错
+// （xsrfErrBlamesCookie）就记一次失败。之前这里失败直接返回，不计数也不换号，
+// 开着 multi_turn 时死号的 fail_count 永远是 0、一直显示健康，新会话每次轮到它都失败。
+func convXSRF(conv *convState, proxyURL string) (string, error) {
+	tok, err := getXSRF(conv.cookie, conv.authuser, proxyURL)
+	if err == nil {
+		return tok, nil
+	}
+	if errors.Is(err, errGeminiRegion) {
+		return "", err
+	}
+	if acct := accountByID(conv.accountID); acct != nil {
+		if _, _, rerr := rotateAccount(*acct); rerr == nil {
+			if fresh := accountByID(conv.accountID); fresh != nil {
+				tok2, err2 := getXSRF(fresh.Cookie, fresh.AuthUser, proxyURL)
+				if err2 == nil || errors.Is(err2, errGeminiRegion) {
+					conv.cookie = fresh.Cookie
+					conv.sapisid = extractSAPISID(fresh.Cookie)
+					if err2 == nil {
+						logf("[cookie] 账号 #%d 轮转后恢复可用", fresh.ID)
+					}
+					return tok2, err2
+				}
+			}
+		}
+	}
+	if xsrfErrBlamesCookie(err) {
+		markCookieByStatus(conv.accountID, 401, err.Error())
+	}
+	logf("[conv] 账号 #%d 不可用：%v", conv.accountID, err)
+	return "", &convAccountUnusableError{AccountID: conv.accountID, Err: err}
+}
+
 // streamGenerateConv 发一路会话的一轮。turn==0 是首轮（建会话），>0 是续接（只发新消息）。
 // 整条会话绑定 conv.cookie / conv.proxyID，中途不换号不换出口。成功后回填 conv 的
 // cid/rid/rcid/tok26 和 turn+1，供下一轮续接。
@@ -265,12 +309,11 @@ func streamGenerateConvOnce(prompt string, mc ModelConfig, conv *convState,
 	// 登录态每轮要带 at（XSRF）；匿名不要。
 	xsrf := ""
 	if conv.isLogin && conv.cookie != "" {
-		if tok, err := getXSRF(conv.cookie, conv.authuser, proxyURL); err == nil {
-			xsrf = tok
-		} else {
-			return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID},
-				fmt.Errorf("取 XSRF 失败: %w", err)
+		tok, err := convXSRF(conv, proxyURL)
+		if err != nil {
+			return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID}, err
 		}
+		xsrf = tok
 	}
 
 	inner := make([]interface{}, innerSlots)
@@ -438,7 +481,7 @@ func streamGenerateConvOnce(prompt string, mc ModelConfig, conv *convState,
 		if pickedOK {
 			recordProxyResult(p.ID, true, "")
 		}
-		return &StreamResult{
+		result := &StreamResult{
 			Emitted:          tracker.emitted,
 			EmittedReasoning: rtracker.emitted,
 			Raw:              string(raw),
@@ -449,7 +492,9 @@ func streamGenerateConvOnce(prompt string, mc ModelConfig, conv *convState,
 			AccountID:        conv.accountID,
 			TTFBMs:           ttfb,
 			TotalMs:          time.Since(t0).Milliseconds(),
-		}, nil
+		}
+		fetchUnrequestedMedia(mc, result, conv.cookie, conv.sapisid, xsrf, proxyURL, conv.authuser)
+		return result, nil
 	}
 	return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID}, lastErr
 }
@@ -506,6 +551,11 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 			if !anonFirstEligible(mc, false) {
 				a, _, perr := pickAccountForModel(mc, exclude)
 				if perr != nil {
+					// 换号时已经没号可挑：上一个号是取不到 XSRF，就报它，别说成降级
+					var unusable *convAccountUnusableError
+					if try > 0 && errors.As(err, &unusable) {
+						break
+					}
 					var last *ModelDowngradedError
 					if try > 0 && errors.As(err, &last) {
 						// 换号时已经没号可挑：报上一个号真实的降级，补上解冻时间
@@ -525,6 +575,12 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 			}
 		}
 		res, err = runConversationTurn(prompt, mc, conv, onDelta, onReasoning)
+		// 新会话的号取不到 XSRF（convXSRF 里已记过失败）：排除它，换下一个号。
+		var unusable *convAccountUnusableError
+		if fresh && errors.As(err, &unusable) && unusable.AccountID > 0 {
+			exclude[unusable.AccountID] = true
+			continue
+		}
 		if !retryOnAnotherAccount(res, err, mc, exclude) || !fresh {
 			break
 		}
@@ -543,6 +599,10 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 	var toolCalls []ToolCall
 	if len(tools) > 0 {
 		text, toolCalls = parseToolCalls(text)
+	}
+	// 文本模型被上游切去生图 / 音乐（#105）：产物附在正文后面，续接历史也按这份正文记。
+	if len(res.Artifacts) > 0 {
+		text = appendArtifactMarkdown(text, res.Artifacts)
 	}
 	if text == "" && len(toolCalls) == 0 {
 		return "", nil, res, fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(res.Raw))

@@ -216,6 +216,32 @@ func TestRefusalHTTPAndNormalStreaming(t *testing.T) {
 	}
 }
 
+func TestRefusalCheckStreamsTextWithUnrequestedMedia(t *testing.T) {
+	setRefusalCheck(t, true)
+	old := generateGeminiFiles
+	t.Cleanup(func() { generateGeminiFiles = old })
+	const reply = "Here is your image."
+	const reasoning = "Preparing the image."
+	generateGeminiFiles = func(_, _ string, _ ModelConfig, _ []pendingUpload, delta, reason func(string)) (*StreamResult, error) {
+		delta(reply)
+		reason(reasoning)
+		return &StreamResult{
+			Raw:              refusalTestFrame(reply),
+			Emitted:          reply,
+			Reasoning:        reasoning,
+			EmittedReasoning: reasoning,
+			Artifacts:        []MediaArtifact{{Mime: "image/png", Data: []byte("png")}},
+		}, nil
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-3.6-flash","stream":true,"messages":[{"role":"user","content":"draw a cat"}]}`))
+	handleChatCompletions(w, r)
+	body := w.Body.String()
+	if w.Code != 200 || strings.Count(body, reply) != 1 || strings.Count(body, reasoning) != 1 || !strings.Contains(body, "data:image/png;base64,cG5n") {
+		t.Fatalf("expected one copy of the text and reasoning plus the image, got %d %s", w.Code, body)
+	}
+}
+
 func TestRefusalInvalidatesConversation(t *testing.T) {
 	setRefusalCheck(t, true)
 	resetConversationTestState(t)

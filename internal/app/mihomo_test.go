@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -287,6 +288,70 @@ func TestMihomoRecoveryBudgetAndRouting(t *testing.T) {
 				if calls != 1 || f.puts != 0 {
 					t.Fatalf("unexpected retry: calls=%d puts=%d", calls, f.puts)
 				}
+			}
+		})
+	}
+}
+
+type mihomoTestTransport func(*http.Request) (*http.Response, error)
+
+func (f mihomoTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestMihomoRecoversConversationXSRF(t *testing.T) {
+	for _, afterRotation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_rotation=%t", afterRotation), func(t *testing.T) {
+			f, c := newFakeMihomo(t)
+			setMihomoTestConfig(t, c)
+			id := addTestAccount(t, t.Name())
+			bindAccountProxy(id, 7)
+			conv := &convState{accountID: id, cookie: accountByID(id).Cookie}
+			t.Cleanup(func() { invalidateXSRF(conv.cookie) })
+			var rotations int
+			client := &http.Client{Transport: mihomoTestTransport(func(r *http.Request) (*http.Response, error) {
+				response := &http.Response{StatusCode: 200, Header: make(http.Header)}
+				var body string
+				switch r.URL.Path {
+				case "/app":
+					switch {
+					case afterRotation && !strings.Contains(r.Header.Get("Cookie"), "SIDCC=fresh"):
+						body = "Sign in"
+					case mihomoSwitches.generation.Load() == 0:
+						body = "Gemini isn't currently supported in your country."
+					default:
+						body = `"SNlM0e":"recovered-token"`
+					}
+				case "/RotateCookiesPage":
+					rotations++
+					body = "init('12345', 658.0, 0.0, 0.0, 600.0)"
+				case "/RotateCookies":
+					response.Header.Set("Set-Cookie", "SIDCC=fresh")
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				response.Body = io.NopCloser(strings.NewReader(body))
+				return response, nil
+			})}
+			clientKey := fmt.Sprintf("%s|%d", c.MihomoProxyURL, c.RequestTimeout)
+			oldClient, hadClient := stdlibClientCache.Swap(clientKey, client)
+			t.Cleanup(func() {
+				if hadClient {
+					stdlibClientCache.Store(clientKey, oldClient)
+				} else {
+					stdlibClientCache.Delete(clientKey)
+				}
+			})
+			var tok string
+			_, err := generateWithMihomoRecovery(func() (*StreamResult, error) {
+				var err error
+				tok, err = convXSRF(conv, c.MihomoProxyURL)
+				return &StreamResult{ProxyID: 7, AccountID: id}, err
+			})
+			wantRotations := 0
+			if afterRotation {
+				wantRotations = 1
+			}
+			if err != nil || tok != "recovered-token" || f.puts != 1 || rotations != wantRotations || accountByID(id).FailCount != 0 {
+				t.Fatalf("XSRF recovery: token=%q switches=%d rotations=%d err=%v", tok, f.puts, rotations, err)
 			}
 		})
 	}

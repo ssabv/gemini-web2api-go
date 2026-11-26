@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Version = "4.32.0"
+const Version = "4.33.0"
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	body, _ := json.Marshal(data)
@@ -187,6 +187,15 @@ func callGeminiChecked(prompt, latest string, mc ModelConfig, tools []map[string
 		// 产物以 base64 data URL 追加到正文（可能没正文，只有图/乐/视频）。
 		text = appendArtifactMarkdown(text, res.Artifacts)
 		return text, nil, res, nil
+	}
+	// 文本模型被上游切去生图 / 音乐（#105）：产物照样附在正文后面。
+	if len(res.Artifacts) > 0 {
+		var toolCalls []ToolCall
+		if len(tools) > 0 {
+			text, toolCalls = parseToolCalls(text)
+		}
+		checked.accept()
+		return appendArtifactMarkdown(text, res.Artifacts), toolCalls, res, nil
 	}
 	if text == "" {
 		// 上游拒绝时只回一个结束帧、没有内容帧（实测被拒时 raw 仅 216

@@ -3,6 +3,7 @@ package app
 import (
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -11,11 +12,13 @@ import (
 )
 
 func logf(format string, args ...interface{}) {
+	now := time.Now()
+	msg := fmt.Sprintf(format, args...)
+	raw := fmt.Sprintf("[%s] %s", now.Format("15:04:05"), msg)
 	if rtCfg().LogRequests {
-		fmt.Fprintf(os.Stderr, "[%s] %s\n",
-			time.Now().Format("15:04:05"),
-			fmt.Sprintf(format, args...))
+		fmt.Fprintln(os.Stderr, raw)
 	}
+	globalLogBuffer.Add(now, msg, raw)
 }
 
 // maskKey shows "sk-gemini-XXXX...YYYY" for banner. Empty stays empty.
@@ -155,8 +158,10 @@ func Run() {
 		mux.HandleFunc("/admin/api/mihomo/latency", requireAuth(handleAdminMihomoLatency))
 		mux.HandleFunc("/admin/api/cookies", requireAuth(handleAdminCookies))
 		mux.HandleFunc("/admin/api/cookies/", requireAuth(handleAdminCookieItem))
+		mux.HandleFunc("/admin/api/cookies/sync", requireAuth(handleAdminCookieSync))
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))
 		mux.HandleFunc("/admin/api/video-quota", requireAuth(handleAdminVideoQuota))
+		mux.HandleFunc("/admin/api/logs", requireAuth(handleAdminLogs))
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -165,6 +170,13 @@ func Run() {
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0, // streaming responses can be long
+	}
+	// 先绑定端口再打印横幅：端口被占时不会印出 Listening，印出来时端口已经能连，
+	// 拉起本程序的父进程可以把 Listening 这一行当就绪信号（#101）。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		os.Exit(1)
 	}
 
 	cookieStatus := "none (anonymous)"
@@ -182,7 +194,7 @@ func Run() {
 	sort.Strings(modelNames)
 
 	fmt.Printf("gemini-web2api-go v%s\n", Version)
-	fmt.Printf("  Listening:   http://%s\n", addr)
+	fmt.Printf("  Listening:   http://%s:%d\n", cfg.Host, ln.Addr().(*net.TCPAddr).Port)
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
 	fmt.Printf("  API key:     %s%s\n", maskKey(resolvedAPIKey),
 		map[bool]string{true: "  (locked by flag/env)", false: "  (mutable in admin UI)"}[apiKeyLocked])
@@ -209,7 +221,7 @@ func Run() {
 	fmt.Println()
 	warnEnvProxyIgnored()
 
-	if err := server.ListenAndServe(); err != nil {
+	if err := server.Serve(ln); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}
